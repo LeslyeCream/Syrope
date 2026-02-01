@@ -7,7 +7,8 @@ from urllib.parse import urlparse
 from readability import Document
 from urllib.parse import quote
 from pathlib import Path
-import aiohttp
+from icecream import ic
+import validators
 import threading
 import edge_tts
 import requests
@@ -29,6 +30,8 @@ file_lock = threading.Lock()
 # ✔️ Add MS TTS EDGE
 # Check settings / paths 
 # Handle errors
+# Add tags function
+# replace build_template to kwargs
 
 
 # ::::: LOAD SETTINGS :::::
@@ -77,6 +80,75 @@ def get_json_data(json_file):
 # ====================================
 
 
+
+
+
+
+
+# ::::: GET URLS  :::::
+@click.command()
+@click.argument("url", required= False)
+@click.option("-l", "--labels", type=str, help="etiquetas para articulos")
+@click.option("-t", "--translate", is_flag=True, help="Traducir articulo")
+@click.option("-v", "--voice", is_flag=True, help="nota de voz")
+@click.option("-r", "--regex", is_flag=True, help="aplicar reglas regex")
+@click.option("-i", "--input-file", type=str, help="Procesar urls desde archivo")
+@click.option("-s", "--sync", is_flag=True, help="Procesar urls desde archivo")
+def get_urls(**kwargs):
+  params = kwargs
+  
+  # --- add creation date --- 
+  creation_date = {"creation_date": dt.now().strftime('%Y-%m-%d %H:%M')}
+  params.update(creation_date)
+  
+  # --- save urls from file
+  input_file = params.get("input_file")
+  
+  if input_file:
+    urls = load_from_file(input_file)
+    for url in urls:
+      url_params = params.copy()
+      url_params["url"] = url
+      del url_params["input_file"]
+      save_change_to_file(url_params)
+    print(f"{len(urls)} urls saved!")
+
+  # --- save single url ---
+  elif params.get("url"):
+    if validators.url(params.get("url")):
+      save_change_to_file(params)
+      print("url saved!")
+    else:
+      print("url invalid")
+  else:
+    print("None url found")
+  
+  if params.get("sync"):
+    start_sync()
+# ====================================
+
+
+# ::::: SAVE URL/S IN JSON :::::
+def save_change_to_file(params: dict):
+  url = params.get("url").encode("utf-8")
+  json_name = get_hash(url)
+  full_path = OFFLINE_DIR.joinpath(f"{json_name}.json")
+  with open(full_path, "w", encoding="utf-8") as f:
+        json.dump(params, f, ensure_ascii=False, indent=4)
+# ====================================
+
+
+# ::::: LOAD URLS FROM FILE :::::
+def load_from_file(input_file: str):
+  with open(input_file, "r") as f:
+    content = f.readlines()
+    valid_urls = [url.strip() for url in content if validators.url(url.strip())]
+  return valid_urls
+# ====================================
+
+
+
+"""
 # ::::: SAVE LINK :::::
 def save_link(url: str):
   parsed = urlparse(url)
@@ -92,6 +164,7 @@ def save_link(url: str):
   else:
     show_message("Invalid URL")
 # ====================================
+"""
 
 
 # ::::: CLEAR THIS PAGE :::::
@@ -126,7 +199,7 @@ def get_hash(text: str) -> str:
 
 
 # ::::: DOWNLOAD SINGLE IMAGE :::::
-def download_img_file(url_img: str, session: aiohttp.ClientSession) -> str:
+def download_img_file(url_img: str) -> str:
   # Load image 
   img_obj = requests.get(url_img, timeout=REQUEST_TIMEOUT)
   
@@ -252,7 +325,6 @@ def content_rules(content: str) -> str:
   regex_rules: list[tuple[str, str]] = [(rule["Pattern"], rule["Replacement"]) for rule in RULES_REGEX]
 
   for pattern, replacement in regex_rules:
-    print(replacement)
     content: str = re.sub(pattern, replacement, content)
   return content
 # ====================================
@@ -265,9 +337,15 @@ def save_to_file(name_file: str, content: str) -> None:
     file.write(content)
 # ====================================
 
+# ::::: FORMAT TAGS :::::
+def format_tags(tags: str) -> str:
+  x_tags = tags.split(",")
+  return "\n" + "".join(f"  - {i}\n" for i in x_tags)
+# ====================================
+
 
 # ::::: BUILD TEMPLATE :::::
-def build_template(creation_date, author, title, num_words, read_time, full_note, url, audio) -> str:
+def build_template(creation_date, author, title, num_words, read_time, full_note, url, tags, audio) -> str:
   metadata = {
   "%CREATIONDATE": creation_date,
   "%AUTHOR": author if  author != "[no-author]" else "Unknown",
@@ -275,6 +353,7 @@ def build_template(creation_date, author, title, num_words, read_time, full_note
   "%READTIME": f"{read_time} minutes",
   "%ARTICLE": full_note,
   "%URL": url,
+  "%TAGS": tags if tags else "",
   "%AUDIO": f"![[{audio}.mp3]]" if audio is not None else ""
   }
   
@@ -397,12 +476,15 @@ def text_to_voice(text: str, name_file: str) -> None:
 
 # ::::: MAIN :::::
 def main(json_file: Path) -> None:
-  article_data = get_json_data(json_file)
+  # --- JSON SETTINGS ---
+  article_params = get_json_data(json_file)
+  creation_date: str = article_params["creation_date"]
+  url: str = article_params["url"]
+  voice_on = article_params["voice"]
+  tags = format_tags(article_params["labels"])
+  custom_rules = article_params["regex"]
   
-  # --- JSON METADATA ---
-  creation_date: str = article_data["Creation_date"]
-  url: str = article_data["Url"]
-
+  # --- CLEAR THIS PAGE --+ 
   #url = clear_this_page(url)
 
   # --- HTML ---
@@ -421,28 +503,30 @@ def main(json_file: Path) -> None:
     read_time = num_words // WPM
   
   # --- APPLY REGEX CONTENT RULES ---
-    markdown_article = content_rules(md_article)
+  if custom_rules:
+    md_article = content_rules(md_article) 
   
   # --- TRANSLATE --- 
     """
-    if detect_language(markdown_article) != DEFAULT_LANGUAGE:
-      md_styles_avoid = r"^\!|\[+|`+"
+    if detect_language(md_article) != DEFAULT_LANGUAGE:
+      md_styles_avoid = r"^!|[+|`+"
 
-      for chunk in markdown_article.split("\n\n"):
+      for chunk in md_article.split("\n\n"):
         if not re.match(md_styles_avoid, chunk):
           chunk_translated = translate(chunk)
           print(chunk_translated)
-          md_article = markdown_article.replace(chunk, chunk_translated)
+          md_article = md_article.replace(chunk, chunk_translated)
           time.sleep(1.3)
     """
   
   # --- EDGE TTS ---
+  if voice_on:
     audio_filename = get_hash(title.encode('utf-8'))
-    plain_text = convert_to_plaintext(markdown_article)
+    plain_text = convert_to_plaintext(md_article)
     text_to_voice(plain_text, audio_filename)
 
   # --- IMAGES ---
-    full_note = batch_img_download(markdown_article)
+    full_note = batch_img_download(md_article)
     
   # --- BUILD TEMPLATE ---
     note_templated = build_template(
@@ -453,6 +537,7 @@ def main(json_file: Path) -> None:
       read_time,
       full_note,
       url,
+      tags, 
       audio_filename
     )
   
@@ -476,12 +561,12 @@ def start_sync() -> None:
     for future in as_completed(futures):  
       try:
         future.result()
-      except Exception:
-        pass
+      except Exception as e:
+        show_message(e)
 # ====================================
 
 
 if __name__ == "__main__":
   validate_dir_paths()
-  start_sync()
+  get_urls()
   
