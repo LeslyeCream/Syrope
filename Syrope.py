@@ -26,12 +26,12 @@ file_lock = threading.Lock()
 
 # ::::: TO-DO ::::::
 # ✔️ Add Translate
-# Add @click 
+# ✔️ Add @click 
 # add Download PDF' articles
 # ✔️ Add MS TTS EDGE
 # Check settings / paths 
 # Handle errors
-# Add tags function
+# ✔️ Add tags function
 # replace build_template to kwargs
 
 
@@ -533,7 +533,7 @@ def main(json_file: Path) -> None:
     full_note = batch_img_download(md_article)
 
   # --- BUILD TEMPLATE ---
-    note_templated = build_template(    creation_date, author, title, num_words, read_time, full_note, url, tags, audio_filename)
+    note_templated = build_template(creation_date, author, title, num_words, read_time, full_note, url, tags, audio_filename)
   
   # --- SAVE FILE ---
     save_to_file(title, note_templated)
