@@ -8,6 +8,7 @@ from readability import Document
 from urllib.parse import quote
 from pathlib import Path
 from icecream import ic
+from loguru import logger
 import validators
 import threading
 import edge_tts
@@ -80,11 +81,6 @@ def get_json_data(json_file):
 # ====================================
 
 
-
-
-
-
-
 # ::::: GET URLS  :::::
 @click.command()
 @click.argument("url", required= False)
@@ -121,8 +117,9 @@ def get_urls(**kwargs):
     else:
       print("url invalid")
   else:
-    print("None url found")
-  
+    print("None url or file selected")
+    start_sync()
+    
   if params.get("sync"):
     start_sync()
 # ====================================
@@ -217,6 +214,7 @@ def download_img_file(url_img: str) -> str:
 # ====================================
 
 
+"""
 # ::::: DELETE DUPLICATE LINKS (IMG) :::::
 def del_dupli_links(article: str , markdown_img) -> str:
   mod_article = article
@@ -229,6 +227,7 @@ def del_dupli_links(article: str , markdown_img) -> str:
       mod_article = re.sub(re.escape(i), i, mod_article, count=1)
   return mod_article
 # ====================================
+"""
 
 
 # ::::: BATCH DOWNLOAD :::::
@@ -257,7 +256,7 @@ def batch_img_download(article_content: str) -> str:
   # ====================================
 
 
-# ::::: FORMAT TITLE :::::
+# ::::: FORMAT INLINE TITLE :::::
 def fix_title(title: str) -> str:
   pattern = re.compile(r'[\[\]#^|\:*?"<>\/|]') # To-do - enchance this
   clean_title: str = pattern.sub("", title)
@@ -337,6 +336,7 @@ def save_to_file(name_file: str, content: str) -> None:
     file.write(content)
 # ====================================
 
+
 # ::::: FORMAT TAGS :::::
 def format_tags(tags: str) -> str:
   x_tags = tags.split(",")
@@ -353,7 +353,7 @@ def build_template(creation_date, author, title, num_words, read_time, full_note
   "%READTIME": f"{read_time} minutes",
   "%ARTICLE": full_note,
   "%URL": url,
-  "%TAGS": tags if tags else "",
+  "%TAGS": format_tags(tags) if tags else "",
   "%AUDIO": f"![[{audio}.mp3]]" if audio is not None else ""
   }
   
@@ -475,13 +475,17 @@ def text_to_voice(text: str, name_file: str) -> None:
 
 
 # ::::: MAIN :::::
+LOG_FILE = "logs/app.log"
+logger.add(LOG_FILE, rotation="500 MB", level="DEBUG")
+@logger.catch
 def main(json_file: Path) -> None:
+  
   # --- JSON SETTINGS ---
   article_params = get_json_data(json_file)
-  creation_date: str = article_params["creation_date"]
-  url: str = article_params["url"]
+  creation_date = article_params["creation_date"]
+  url = article_params["url"]
   voice_on = article_params["voice"]
-  tags = format_tags(article_params["labels"])
+  tags = article_params["labels"]
   custom_rules = article_params["regex"]
   
   # --- CLEAR THIS PAGE --+ 
@@ -495,7 +499,7 @@ def main(json_file: Path) -> None:
 
   # --- MARKDOWN ---
     md_article = md(summary_article)
-    
+
   # --- ARTICLE METADATA ---
     author = html_article.author()
     title = fix_title(html_article.title())
@@ -503,8 +507,8 @@ def main(json_file: Path) -> None:
     read_time = num_words // WPM
   
   # --- APPLY REGEX CONTENT RULES ---
-  if custom_rules:
-    md_article = content_rules(md_article) 
+    if custom_rules:
+      md_article = content_rules(md_article) 
   
   # --- TRANSLATE --- 
     """
@@ -520,26 +524,16 @@ def main(json_file: Path) -> None:
     """
   
   # --- EDGE TTS ---
-  if voice_on:
-    audio_filename = get_hash(title.encode('utf-8'))
-    plain_text = convert_to_plaintext(md_article)
-    text_to_voice(plain_text, audio_filename)
+    if voice_on:
+      audio_filename = get_hash(title.encode('utf-8'))
+      plain_text = convert_to_plaintext(md_article)
+      text_to_voice(plain_text, audio_filename)
 
   # --- IMAGES ---
     full_note = batch_img_download(md_article)
-    
+
   # --- BUILD TEMPLATE ---
-    note_templated = build_template(
-      creation_date,
-      author, 
-      title,
-      num_words,
-      read_time,
-      full_note,
-      url,
-      tags, 
-      audio_filename
-    )
+    note_templated = build_template(    creation_date, author, title, num_words, read_time, full_note, url, tags, audio_filename)
   
   # --- SAVE FILE ---
     save_to_file(title, note_templated)
