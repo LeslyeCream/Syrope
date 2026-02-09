@@ -1,32 +1,25 @@
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from langdetect import detect, DetectorFactory
 from markdownify import markdownify as md
-from Settings import load_settings
+from langdetect import detect
 from datetime import datetime as dt
 from urllib.parse import urlparse
 from readability import Document
+from aiohttp import ClientError
 from urllib.parse import quote
 from pathlib import Path
-from icecream import ic
 from loguru import logger
 import validators
 import threading
 import edge_tts
 import requests
 import hashlib
+import aiohttp
+import asyncio
+import base64
 import click
 import yaml
 import json
 import time
 import re
-
-
-import aiohttp
-from aiohttp import ClientError
-import asyncio
-
-
-file_lock = threading.Lock()
 
 
 # ::::: TO-DO ::::::
@@ -39,20 +32,6 @@ file_lock = threading.Lock()
 # Add tags function
 # replace build_template to kwargs
 
-
-# ::::: DECORATOR :::::
-from functools import wraps
-import time
-def tempus(func):
-    @wraps(func)
-    def wrapper(*args, **kwargs):
-        start = time.perf_counter()  # más preciso que time.time()
-        result = func(*args, **kwargs)
-        end = time.perf_counter()
-        print(f"Finalizado en: {end - start:.5f} s")
-        return result
-    return wrapper
-# ====================================
 
 # ::::: LOAD SETTINGS :::::
 with open(Path(__file__).parent.joinpath("Settings.yaml"), "r") as file:
@@ -216,28 +195,6 @@ def get_hash(text: str) -> str:
 
 
 """
-# ::::: DOWNLOAD SINGLE IMAGE :::::
-def batxhoimg(url_img: str) -> str:
-  
-  # Load image 
-  img_obj = requests.get(url_img, timeout=REQUEST_TIMEOUT)
-  
-  # Get info image
-  img_extension = Path(urlparse(url_img).path).suffix.lower()
-  full_img_name  = get_hash(img_obj.content) + img_extension
-  full_path = ATTACHMENTS_DIR.joinpath(full_img_name)
-  
-  # Save image
-  with file_lock:
-    with open(full_path, "wb") as f:
-      f.write(img_obj.content)
-      
-  return full_img_name
-# ====================================
-"""
-
-
-"""
 # ::::: DELETE DUPLICATE LINKS (IMG) :::::
 def del_dupli_links(article: str , markdown_img) -> str:
   mod_article = article
@@ -250,33 +207,6 @@ def del_dupli_links(article: str , markdown_img) -> str:
       mod_article = re.sub(re.escape(i), i, mod_article, count=1)
   return mod_article
 # ====================================
-"""
-
-"""
-# ::::: BATCH DOWNLOAD :::::
-def batcho(article_content: str) -> str:
-  bracket_pattern = r"^(?:!|[)[^\n]*?\)\s*$"
-  #only_url_pattern = r"https?://[^\s]+?\.(jpg|jpeg|png|webp|heic|avif|gif)"
-  only_url_pattern = r"https?://[^\s\)]+(?:jpg|jpeg|png|webp|heic|avif|gif)[^\s\)]*"
-  
-  # Find brackets_links 
-  brackets_links: list = re.findall(bracket_pattern, article_content, re.MULTILINE)
-  new_line_pattern = r'(?<=\))(!\[\])(?=\()'
-  
-  
-  # Mapping brackets_links
-  if len(brackets_links) >= 1:
-    brackets_map: dict = {match.group(0): bracket for bracket in brackets_links if (match := re.search(only_url_pattern, bracket))}
-      
-    for img_link, bracket in brackets_map.items():
-      local_img = download_img_file(img_link)
-      article_content = article_content.replace(img_link, local_img)
-    
-    return re.sub(new_line_pattern, r'\n\n\1', article_content)
-
-  else:
-    return article_content
-  # ====================================
 """
 
 
@@ -297,10 +227,10 @@ async def download_img_file(aiohttp_request, url_img):
       with open(full_path, "wb") as img:
         img.write(img_obj)
           
-      return {md5_img_name: url_img}
+      return md5_img_name
   
   except Exception: # if download fail 
-    return {url_img: url_img}
+    return url_img
   
 
 # ====================================
@@ -317,14 +247,15 @@ async def batch_img_download(article_content: str) -> str:
   
   # Mapping brackets_links
   if len(brackets_links) >= 1:
-    brackets_map: dict = {only_url_img.group(0): bracket for bracket in brackets_links if (only_url_img := re.search(only_url_pattern, bracket))}
+    url_imgs: list = [only_url_img.group(0) for bracket in brackets_links if (only_url_img := re.search(only_url_pattern, bracket))]
 
     async with aiohttp.ClientSession() as aiohttp_request:
-      tasks = [download_img_file(aiohttp_request, url) for url in brackets_map]
+      tasks = [download_img_file(aiohttp_request, url) for url in url_imgs]
       img_objects: list = await asyncio.gather(*tasks, return_exceptions=True)
   
-    for dictt in img_objects:
-      local_img, ext_img = dictt.popitem()
+    brackets_map = dict(zip(brackets_links, img_objects))
+    
+    for local_img, ext_img in brackets_map.items():
       article_content = article_content.replace(ext_img, local_img)
     
     return re.sub(new_line_pattern, r'\n\n\1', article_content)
@@ -342,17 +273,6 @@ def fix_title(title: str) -> str:
 # ====================================
 
 
-# ::::: DETECT LANGUAGE :::::
-def detect_language(text: str) -> str:
-  DetectorFactory.seed = 0
-  try:
-    chunk_txt =   str(text.splitlines()[:5])
-    return detect(chunk_txt)
-  except Exception:
-    return DEFAULT_LANGUAGE
-# ====================================
-
-
 # ::::: GOOGLE TRANSLATE :::::
 def google_translate(input_text: str) -> str:
   google_url = f"https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=es&dt=t&q={str(quote(input_text))}"
@@ -363,18 +283,10 @@ def google_translate(input_text: str) -> str:
 
 # ::::: CLOUDFARE AI TRANSLATE :::::
 async def cloudfare_translate(txt_translate: str, aiohttp_request) -> str:
-  prompt = f"Translate the following text into {DEFAULT_LANGUAGE} while preserving meaning, tone, cultural nuance, and style. If idioms or context don’t translate directly, adapt them naturally for the target audience. Provide only the translated text, no explanations.Text:"
+  encoded_text = base64.b64encode(txt_translate.encode('utf-8')).decode('ascii')
+  prompt = f"Decode this base64 text first, then Translate the following text into {DEFAULT_LANGUAGE} while preserving meaning, tone, cultural nuance, and style. Provide only the translated text, no explanations.Text:"
   headers: dict = {'Authorization': f'Bearer {API_KEY}', 'Content-Type': 'application/json'}
-  body: dict = {"messages": [{"role": "system", "content": prompt},{"role": "user", "content": txt_translate}]}
-  # try:
-  #   headers: dict = {'Authorization': f'Bearer {API_KEY}', 'Content-Type': 'application/json'}
-  #   body: dict = {"messages": [{"role": "system", "content": prompt},{"role": "user", "content": txt_translate}]}
-  #   http_request = requests.post(url=CLOUDFARE_URL, headers=headers, json=body)
-  #   answer_content = http_request.json()
-  #   return answer_content['result']['response']
-  # except Exception:
-  #   return txt_translate
-  
+  body: dict = {"messages": [{"role": "system", "content": prompt},{"role": "user", "content": encoded_text}]}
   
   try:
     async with aiohttp_request.post(CLOUDFARE_URL, headers=headers, json=body) as resp:      
@@ -395,43 +307,25 @@ def lingva_translate(txt_to_translate: str) -> str:
     return txt_to_translate
 # ====================================
 
-"""
-# ::::: TRANSLATE CONTENT:::::
-async def old_translate(text: str, api_service=lingva_translate) -> str:
-  try:
-    text_translated = api_service(text)
-  except requests.exceptions.RequestException:
-    text_translated = translate(text, api_service=lingva_translate)
-    
-  return text_translated  
-# ====================================
-"""
 
-# ::::: PRE-TRANSLATE :::::
-@tempus
+# ::::: TRANSLATE :::::
 async def translate(md_article):
-  print("translating...")
-  md_styles_pattern = r"^[!|*|\[|\-]"
+  md_styles_pattern = r'^[!*$$-]'
    
   # --- get originals article's paragraph ---
-  org_chunks = [chunk.strip() for chunk in md_article.split("\n\n") if not re.match(md_styles_pattern, chunk)]
+  org_chunks = [chunk for chunk in md_article.split("\n\n") if not re.match(md_styles_pattern, chunk)]
   
-  # --- batch translated --
+  # --- batch translate --
   async with aiohttp.ClientSession() as aiohttp_request:
     trans_tasks = [cloudfare_translate(org_chunk, aiohttp_request) for org_chunk in org_chunks]
     trans_chunks : list = await asyncio.gather(*trans_tasks, return_exceptions=True)
     
     translated_map = dict(zip(org_chunks, trans_chunks))
+    
     for original_chunk, translated_chunk in translated_map.items():
       md_article = md_article.replace(original_chunk, translated_chunk)
 
     return md_article
-  # for original_chunk in org_chunks: 
-  #   chunk_translated = translate(original_chunk)
-  #   md_article = md_article.replace(original_chunk, chunk_translated)
-  #   time.sleep(1.2)
-  
-  #return md_article
 # ====================================
   
 
@@ -485,13 +379,12 @@ def build_template(creation_date, author, title, num_words, read_time, full_note
 
 # ::::: DELETE / MOVE JSON FINISHED :::::
 def delete_json(json_file: Path) -> None:
-  with file_lock:
-    done_path = ARTICLES_SYNCED_DIR.joinpath(json_file.name)
-    
-    if DEL_SYNCED_ARTICLES:
-      json_file.unlink(missing_ok=True)
-    else:
-      json_file.rename(done_path)
+  done_path = ARTICLES_SYNCED_DIR.joinpath(json_file.name)
+  
+  if DEL_SYNCED_ARTICLES:
+    json_file.unlink(missing_ok=True)
+  else:
+    json_file.rename(done_path)
 # ====================================
 
 
@@ -520,7 +413,7 @@ def clean_attachments():
 # ::::: SHOW MESSAGES :::::
 def show_message(msg: str, sep="-") -> None:
   line = sep * len(msg)
-  print(f"{line}\n{msg}\n{line}")
+  print(f"{line}\n{msg}\n{line}", end="\r")
 # ====================================
 
 
@@ -605,7 +498,7 @@ async def main(json_file: Path) -> None:
   custom_rules = article_params["regex"]
   translate_on = article_params["translate"]
   
-  
+  show_message(f"Downloading {url}")
   # --- CLEAR THIS PAGE --+ 
   #url = clear_this_page(url)
 
@@ -629,7 +522,8 @@ async def main(json_file: Path) -> None:
       md_article = content_rules(md_article) 
   
   # --- TRANSLATE --- 
-    if translate_on and detect_language(md_article) != DEFAULT_LANGUAGE:
+    if translate_on and detect(md_article) != DEFAULT_LANGUAGE:
+      show_message("Translating")
       md_article = await translate(md_article)
 
   # --- EDGE TTS ---
@@ -637,7 +531,8 @@ async def main(json_file: Path) -> None:
       audio_filename = get_hash(title.encode('utf-8'))
       plain_text = convert_to_plaintext(md_article)
       text_to_voice(plain_text, audio_filename)
-
+    else:
+      audio_filename = None
   # --- IMAGES ---
     full_note = await batch_img_download(md_article)
 
@@ -658,21 +553,18 @@ async def start_sync() -> None:
   
   json_files = list(OFFLINE_DIR.glob("*.json"))
   
-  
   for i in json_files:
     await main(i)
 # ====================================
 
 
 if __name__ == "__main__":
-  #validate_dir_paths()
-  #get_urls()
-  
-  
-  filee = "/storage/emulated/0/Documents/Obsidian/Read Later/The Nonwriter's Guide to Writing A Lot.md"
-  with open(filee, "r") as f:
-    text = f.read()
-    x = asyncio.run(translate(text))
-    print(x)
-  
+  validate_dir_paths()
+  get_urls()
 
+  
+  # filee = "/storage/emulated/0/Documents/Obsidian/Read Later/The Nonwriter's Guide to Writing A Lot.md"
+  # with open(filee, "r") as f:
+  #   text = f.read()
+  #   x = asyncio.run(translate(text))
+  #   print(x)
