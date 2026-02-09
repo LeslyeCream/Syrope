@@ -238,26 +238,23 @@ async def download_img_file(aiohttp_request, url_img):
 
 # ::::: EXPERIMENTAL -BATCH DOWNLOAD :::::
 async def batch_img_download(article_content: str) -> str:
-  bracket_pattern = r"^(?:!|\[)[^\n]*?\)\s*$"
+  bracket_pattern = r"^[!\[].+\)$"
   only_url_pattern = r"https?://[^\s\)]+(?:jpg|jpeg|png|webp|heic|avif|gif)[^\s\)]*"
   new_line_pattern = r'(?<=\))(!\[\])(?=\()'
-
+  
   # Find brackets_links 
   brackets_links: list = re.findall(bracket_pattern, article_content, re.MULTILINE)
   
   # Mapping brackets_links
   if len(brackets_links) >= 1:
     url_imgs: list = [only_url_img.group(0) for bracket in brackets_links if (only_url_img := re.search(only_url_pattern, bracket))]
-
     async with aiohttp.ClientSession() as aiohttp_request:
       tasks = [download_img_file(aiohttp_request, url) for url in url_imgs]
       img_objects: list = await asyncio.gather(*tasks, return_exceptions=True)
-  
-    brackets_map = dict(zip(brackets_links, img_objects))
     
-    for local_img, ext_img in brackets_map.items():
-      article_content = article_content.replace(ext_img, local_img)
-    
+    for ext_img, local_img in list(zip(brackets_links, img_objects)):
+      article_content = re.sub(re.escape(ext_img), f"![[{local_img}]]", article_content)
+      
     return re.sub(new_line_pattern, r'\n\n\1', article_content)
   
   else:
@@ -543,7 +540,7 @@ async def main(json_file: Path) -> None:
     save_to_file(title, note_templated)
   
   # --- DEL ARTICLE DOWNLOADED ---
-    delete_json(json_file)
+    #delete_json(json_file)
   # ====================================
 
 
