@@ -17,6 +17,7 @@ import asyncio
 import base64
 import click
 import yaml
+import random
 import json
 import time
 import re
@@ -210,7 +211,7 @@ def del_dupli_links(article: str , markdown_img) -> str:
 """
 
 
-# ::::: EXPERIMENTAL - DOWNLOAD AND SAVE IMAGE :::::
+# ::::: DOWNLOAD AND SAVE IMAGE :::::
 async def download_img_file(aiohttp_request, url_img):
   try:
     async with aiohttp_request.get(url_img, timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)) as result:
@@ -236,7 +237,7 @@ async def download_img_file(aiohttp_request, url_img):
 # ====================================
 
 
-# ::::: EXPERIMENTAL -BATCH DOWNLOAD :::::
+# ::::: BATCH DOWNLOAD :::::
 async def batch_img_download(article_content: str) -> str:
   bracket_pattern = r"^[!\[].+\)$"
   only_url_pattern = r"https?://[^\s\)]+(?:jpg|jpeg|png|webp|heic|avif|gif)[^\s\)]*"
@@ -270,18 +271,10 @@ def fix_title(title: str) -> str:
 # ====================================
 
 
-# ::::: GOOGLE TRANSLATE :::::
-def google_translate(input_text: str) -> str:
-  google_url = f"https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=es&dt=t&q={str(quote(input_text))}"
-  response = requests.get(google_url)
-  return response.json()[0][0][0]
-# ====================================   
-
-
 # ::::: CLOUDFARE AI TRANSLATE :::::
 async def cloudfare_translate(txt_translate: str, aiohttp_request) -> str:
   encoded_text = base64.b64encode(txt_translate.encode('utf-8')).decode('ascii')
-  prompt = f"Decode this base64 text first, then Translate the following text into {DEFAULT_LANGUAGE} while preserving meaning, tone, cultural nuance, and style. Provide only the translated text, no explanations.Text:"
+  prompt = f"Decode this base64 text first, then Translate into {DEFAULT_LANGUAGE} while preserving style. Answer only the translated text. My Text:"
   headers: dict = {'Authorization': f'Bearer {API_KEY}', 'Content-Type': 'application/json'}
   body: dict = {"messages": [{"role": "system", "content": prompt},{"role": "user", "content": encoded_text}]}
   
@@ -289,17 +282,24 @@ async def cloudfare_translate(txt_translate: str, aiohttp_request) -> str:
     async with aiohttp_request.post(CLOUDFARE_URL, headers=headers, json=body) as resp:      
       answer_content = await resp.json()
       return answer_content['result']['response']
+  
   except Exception:
       return txt_translate
 # ===================================
 
 
 # ::::: LINGVA SERVICE :::::
-def lingva_translate(txt_to_translate: str) -> str:
+async def lingva_translate(txt_to_translate: str, aiohttp_request) -> str:
   try:
     lingva_url = f"https://translate.plausibility.cloud/api/v1/en/es/{str(quote(txt_to_translate))}"
-    response = requests.get(lingva_url).content.decode('utf-8')
-    return json.loads(response)["translation"]
+    
+    async with aiohttp_request.get(lingva_url) as resp:      
+      answer_content = await resp.json()
+      
+      if answer_content["translation"] != "Not Found":
+        return answer_content["translation"]  
+      else:
+        return txt_to_translate
   except Exception:
     return txt_to_translate
 # ====================================
@@ -309,12 +309,19 @@ def lingva_translate(txt_to_translate: str) -> str:
 async def translate(md_article):
   md_styles_pattern = r'^[!*$$-]'
    
-  # --- get originals article's paragraph ---
+  # --- Split in paragraphs ---
   org_chunks = [chunk for chunk in md_article.split("\n\n") if not re.match(md_styles_pattern, chunk)]
   
+  # --- Limit tasks ---
+  semaphore = asyncio.Semaphore(4)
+  
   # --- batch translate --
+  async def rate_limit(chunk, aiohttp_request):
+    async with semaphore:
+      return await lingva_translate(chunk, aiohttp_request)
+  
   async with aiohttp.ClientSession() as aiohttp_request:
-    trans_tasks = [cloudfare_translate(org_chunk, aiohttp_request) for org_chunk in org_chunks]
+    trans_tasks = [rate_limit(org_chunk, aiohttp_request) for org_chunk in org_chunks]
     trans_chunks : list = await asyncio.gather(*trans_tasks, return_exceptions=True)
     
     translated_map = dict(zip(org_chunks, trans_chunks))
@@ -559,9 +566,3 @@ if __name__ == "__main__":
   validate_dir_paths()
   get_urls()
 
-  
-  # filee = "/storage/emulated/0/Documents/Obsidian/Read Later/The Nonwriter's Guide to Writing A Lot.md"
-  # with open(filee, "r") as f:
-  #   text = f.read()
-  #   x = asyncio.run(translate(text))
-  #   print(x)
