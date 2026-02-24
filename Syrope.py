@@ -102,10 +102,11 @@ def get_urls(**kwargs):
   if input_file:
     urls = load_from_file(input_file)
     for url in urls:
-      url_params = params.copy()
-      url_params["url"] = url
-      del url_params["input_file"]
-      save_change_to_file(url_params)
+      if validators.url(url):
+        url_params = params.copy()
+        url_params["url"] = url
+        del url_params["input_file"]
+        save_change_to_file(url_params)
     print(f"{len(urls)} urls saved!")
 
   # --- save single url ---
@@ -115,12 +116,9 @@ def get_urls(**kwargs):
       print("url saved!")
     else:
       print("url invalid")
+  
+  # --- Nothing else ---
   else:
-    print("None url or file selected")
-    asyncio.run(start_sync())
-
-    
-  if params.get("sync"):
     asyncio.run(start_sync())
 # ====================================
 
@@ -182,7 +180,7 @@ def load_web_site(url: str) -> str:
 
 
 # ::::: EXTRACT ARTICLE FROM HTML :::::
-def readability(html: str) -> str:
+def read_mode(html: str) -> str:
   article_obj = Document(html)
   return article_obj
 # ====================================
@@ -195,20 +193,18 @@ def get_hash(text: str) -> str:
 # ====================================
 
 
-"""
+
 # ::::: DELETE DUPLICATE LINKS (IMG) :::::
-def del_dupli_links(article: str , markdown_img) -> str:
-  mod_article = article
-  processed = []
-  for i in markdown_img:
-    if i in processed:
-      mod_article = re.sub(re.escape(i),"", mod_article, count=1)
-    else:
-      processed.append(i)
-      mod_article = re.sub(re.escape(i), i, mod_article, count=1)
-  return mod_article
+def del_dupli_links(article: str, markdown_img) -> str:
+    processed = set()
+    
+    for i in markdown_img:
+        if i in processed:
+            article = re.sub(re.escape(i), "", article, count=1)
+        else:
+            processed.add(i)
+    return article
 # ====================================
-"""
 
 
 # ::::: DOWNLOAD AND SAVE IMAGE :::::
@@ -228,7 +224,7 @@ async def download_img_file(aiohttp_request, url_img):
       with open(full_path, "wb") as img:
         img.write(img_obj)
           
-      return md5_img_name
+      return f"![[{md5_img_name}]]"
   
   except Exception: # if download fail 
     return url_img
@@ -254,8 +250,9 @@ async def batch_img_download(article_content: str) -> str:
       img_objects: list = await asyncio.gather(*tasks, return_exceptions=True)
     
     for ext_img, local_img in list(zip(brackets_links, img_objects)):
-      article_content = re.sub(re.escape(ext_img), f"![[{local_img}]]", article_content)
-      
+      article_content = re.sub(re.escape(ext_img), local_img, article_content)
+    
+    article_content = del_dupli_links(article_content, img_objects) 
     return re.sub(new_line_pattern, r'\n\n\1', article_content)
   
   else:
@@ -331,14 +328,12 @@ async def translate(md_article):
 
     return md_article
 # ====================================
-  
+
 
 # ::::: REGEX RULES (CONTENT) :::::
 def content_rules(content: str) -> str:
-  regex_rules: list[tuple[str, str]] = [(rule["Pattern"], rule["Replacement"]) for rule in RULES_REGEX]
-
-  for pattern, replacement in regex_rules:
-    content: str = re.sub(pattern, replacement, content)
+  for rule in RULES_REGEX:
+    content = re.sub(rule["Pattern"], rule["Replacement"], content)
   return content
 # ====================================
 
@@ -488,8 +483,7 @@ def text_to_voice(text: str, name_file: str) -> None:
 
 
 # ::::: MAIN :::::
-LOG_FILE = "logs/app.log"
-logger.add(LOG_FILE, rotation="500 MB", level="DEBUG")
+logger.add("log.log", rotation="5 MB", level="DEBUG")
 @logger.catch
 async def main(json_file: Path) -> None:
   
@@ -502,14 +496,13 @@ async def main(json_file: Path) -> None:
   custom_rules = article_params["regex"]
   translate_on = article_params["translate"]
   
-  show_message(f"Downloading {url}")
   # --- CLEAR THIS PAGE --+ 
   #url = clear_this_page(url)
 
   # --- HTML ---
   html_page = load_web_site(url)
   if html_page:
-    html_article = readability(html_page)
+    html_article = read_mode(html_page)
     summary_article = html_article.summary(keep_all_images=True)
 
   # --- MARKDOWN ---
@@ -527,19 +520,19 @@ async def main(json_file: Path) -> None:
   
   # --- TRANSLATE --- 
     if translate_on and detect(md_article) != DEFAULT_LANGUAGE:
-      show_message("Translating")
       md_article = await translate(md_article)
 
   # --- EDGE TTS ---
-    if voice_on:
+    if not voice_on:
       audio_filename = get_hash(title.encode('utf-8'))
       plain_text = convert_to_plaintext(md_article)
       text_to_voice(plain_text, audio_filename)
     else:
       audio_filename = None
+  
   # --- IMAGES ---
     full_note = await batch_img_download(md_article)
-
+  
   # --- BUILD TEMPLATE ---
     note_templated = build_template(creation_date, author, title, num_words, read_time, full_note, url, tags, audio_filename)
   
@@ -547,7 +540,7 @@ async def main(json_file: Path) -> None:
     save_to_file(title, note_templated)
   
   # --- DEL ARTICLE DOWNLOADED ---
-    #delete_json(json_file)
+    delete_json(json_file)
   # ====================================
 
 
@@ -556,13 +549,17 @@ async def start_sync() -> None:
   show_message("Sync started...")
   
   json_files = list(OFFLINE_DIR.glob("*.json"))
-  
-  for i in json_files:
-    await main(i)
+
+  if len(json_files) >= 1:
+    await asyncio.gather(*(main(file_path) for file_path in json_files))
+  else:
+    show_message("Nothing to synchronize")
 # ====================================
+
+
 
 
 if __name__ == "__main__":
   validate_dir_paths()
   get_urls()
-
+  start_sync()
