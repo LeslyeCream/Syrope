@@ -83,12 +83,12 @@ def get_json_data(json_file):
 # ::::: GET URLS  :::::
 @click.command()
 @click.argument("url", required= False)
-@click.option("-l", "--labels", type=str, help="etiquetas para articulos")
-@click.option("-t", "--translate", is_flag=True, help="Traducir articulo")
-@click.option("-v", "--voice", is_flag=True, help="nota de voz")
-@click.option("-r", "--regex", is_flag=True, help="aplicar reglas regex")
-@click.option("-i", "--input-file", type=str, help="Procesar urls desde archivo")
-@click.option("-s", "--sync", is_flag=True, help="Procesar urls desde archivo")
+@click.option("-l", "--labels", type=str, help="Add tags to the article")
+@click.option("-t", "--translate", is_flag=True, help="Translate article")
+@click.option("-v", "--voice", is_flag=True, help="Listen to article")
+@click.option("-r", "--regex", is_flag=True, help="Apply custom regular expressions")
+@click.option("-i", "--input-file", type=str, help="Save URLs from an external file")
+@click.option("-s", "--sync", is_flag=True, help="Start sync")
 def get_urls(**kwargs):
   params = kwargs
   
@@ -103,6 +103,7 @@ def get_urls(**kwargs):
     urls = load_from_file(input_file)
     for url in urls:
       if validators.url(url):
+        url = remove_tracking_param(url)
         url_params = params.copy()
         url_params["url"] = url
         del url_params["input_file"]
@@ -111,7 +112,9 @@ def get_urls(**kwargs):
 
   # --- save single url ---
   elif params.get("url"):
-    if validators.url(params.get("url")):
+    url = params.get("url")
+    if validators.url(url):
+      params["url"] = remove_tracking_param(url)
       save_change_to_file(params)
       print("url saved!")
     else:
@@ -120,6 +123,13 @@ def get_urls(**kwargs):
   # --- Nothing else ---
   else:
     asyncio.run(start_sync())
+# ====================================
+
+# :::::REMOVE TRACKING PARAMETERS :::::
+def remove_tracking_param(url: str) -> str:
+  tracking_regex = r"\?utm.*"
+  url = re.sub(tracking_regex, "", url)
+  return url
 # ====================================
 
 
@@ -260,9 +270,9 @@ async def batch_img_download(article_content: str) -> str:
 # ====================================
 
 
-# ::::: FORMAT INLINE TITLE :::::
-def fix_title(title: str) -> str:
-  pattern = re.compile(r'[\[\]#^|\:*?"<>\/|]') # To-do - enchance this
+# ::::: Satanize INLINE TITLE :::::
+def satanize_inline_title(title: str) -> str:
+  pattern = re.compile(r'[\[\]#"^\|\\/:*?¿<>]')
   clean_title: str = pattern.sub("", title)
   return clean_title
 # ====================================
@@ -304,7 +314,7 @@ async def lingva_translate(txt_to_translate: str, aiohttp_request) -> str:
 
 # ::::: TRANSLATE :::::
 async def translate(md_article):
-  md_styles_pattern = r'^[!*$$-]'
+  md_styles_pattern = r'^[!*\[$$-]'
    
   # --- Split in paragraphs ---
   org_chunks = [chunk for chunk in md_article.split("\n\n") if not re.match(md_styles_pattern, chunk)]
@@ -324,6 +334,7 @@ async def translate(md_article):
     translated_map = dict(zip(org_chunks, trans_chunks))
     
     for original_chunk, translated_chunk in translated_map.items():
+      print(translated_chunk)
       md_article = md_article.replace(original_chunk, translated_chunk)
 
     return md_article
@@ -510,7 +521,7 @@ async def main(json_file: Path) -> None:
 
   # --- ARTICLE METADATA ---
     author = html_article.author()
-    title = fix_title(html_article.title())
+    title = satanize_inline_title(html_article.title())
     num_words = len(md_article.split(" "))
     read_time = num_words // WPM
   
@@ -521,9 +532,10 @@ async def main(json_file: Path) -> None:
   # --- TRANSLATE --- 
     if translate_on and detect(md_article) != DEFAULT_LANGUAGE:
       md_article = await translate(md_article)
-
+      title = await translate(title)
+  
   # --- EDGE TTS ---
-    if not voice_on:
+    if voice_on:
       audio_filename = get_hash(title.encode('utf-8'))
       plain_text = convert_to_plaintext(md_article)
       text_to_voice(plain_text, audio_filename)
@@ -541,7 +553,8 @@ async def main(json_file: Path) -> None:
   
   # --- DEL ARTICLE DOWNLOADED ---
     delete_json(json_file)
-  # ====================================
+
+# ====================================
 
 
 # :::::QUEUE ARTICLES :::::
