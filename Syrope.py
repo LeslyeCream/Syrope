@@ -203,7 +203,6 @@ def get_hash(text: str) -> str:
 # ====================================
 
 
-
 # ::::: DELETE DUPLICATE LINKS (IMG) :::::
 def del_dupli_links(article: str, markdown_img) -> str:
     processed = set()
@@ -218,43 +217,62 @@ def del_dupli_links(article: str, markdown_img) -> str:
 
 
 # ::::: DOWNLOAD AND SAVE IMAGE :::::
-async def download_img_file(aiohttp_request, url_img):
+async def download_img_file(aiohttp_request, url_img: str) -> str:
   try:
-    async with aiohttp_request.get(url_img, timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)) as result:
+    
+    if await is_url_img(url_img):
       
-      # --- Get image file ---
-      img_obj = await result.read()
+      async with aiohttp_request.get(url_img, timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)) as result:
+        
+        # --- Get image file ---
+        img_obj = await result.read()
+        
+        # --- Get info image ---
+        img_extension = Path(urlparse(url_img).path).suffix.lower()
+        md5_img_name  = get_hash(img_obj) + img_extension
+        full_path = ATTACHMENTS_DIR.joinpath(md5_img_name)
+        
+        # --- Save image ---
+        with open(full_path, "wb") as img:
+          img.write(img_obj)
+            
+        return f"![[{md5_img_name}]]"
+    
+    else:
+      return url_img
       
-      # --- Get info image ---
-      img_extension = Path(urlparse(url_img).path).suffix.lower()
-      md5_img_name  = get_hash(img_obj) + img_extension
-      full_path = ATTACHMENTS_DIR.joinpath(md5_img_name)
-      
-      # --- Save image ---
-      with open(full_path, "wb") as img:
-        img.write(img_obj)
-          
-      return f"![[{md5_img_name}]]"
-  
   except Exception: # if download fail 
-    return url_img
-  
+    return f"![]({url_img})"
+# ====================================
 
+
+# ::::: CHECK IF IT'S AN IMG URL :::::
+async def is_url_img(url: str) -> bool:
+  try:
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
+      async with session.head(url, allow_redirects=True) as response:
+        response.raise_for_status()
+        content_type = response.headers.get('content-type', '').split(';')[0].strip()
+        return content_type.startswith('image/')
+  except Exception:
+      return False
 # ====================================
 
 
 # ::::: BATCH DOWNLOAD :::::
 async def batch_img_download(article_content: str) -> str:
   bracket_pattern = r"^[!\[].+\)$"
-  only_url_pattern = r"https?://[^\s\)]+(?:jpg|jpeg|png|webp|heic|avif|gif)[^\s\)]*"
+  #only_url_pattern = r"https?://[^\s\)]+(?:jpg|jpeg|png|webp|heic|avif|gif)[^\s\)]*"
+  only_url_pattern = r"https://[^\s\)\]]+"
   new_line_pattern = r'(?<=\))(!\[\])(?=\()'
   
   # Find brackets_links 
   brackets_links: list = re.findall(bracket_pattern, article_content, re.MULTILINE)
   
-  # Mapping brackets_links
+  # --- Mapping brackets_links ---
   if len(brackets_links) >= 1:
     url_imgs: list = [only_url_img.group(0) for bracket in brackets_links if (only_url_img := re.search(only_url_pattern, bracket))]
+    
     async with aiohttp.ClientSession() as aiohttp_request:
       tasks = [download_img_file(aiohttp_request, url) for url in url_imgs]
       img_objects: list = await asyncio.gather(*tasks, return_exceptions=True)
@@ -281,9 +299,9 @@ def satanize_inline_title(title: str) -> str:
 # ::::: CLOUDFARE AI TRANSLATE :::::
 async def cloudfare_translate(txt_translate: str, aiohttp_request) -> str:
   encoded_text = base64.b64encode(txt_translate.encode('utf-8')).decode('ascii')
-  prompt = f"Decode this base64 text first, then Translate into {DEFAULT_LANGUAGE} while preserving style. Answer only the translated text. My Text:"
+  prompt = f"Eres un traductor experto. Tu única respuesta debe ser la traducción exacta del texto del usuario al idioma {DEFAULT_LANGUAGE}, sin ninguna explicación, saludo, prefacio ni texto adicional. Solo la traducción."
   headers: dict = {'Authorization': f'Bearer {API_KEY}', 'Content-Type': 'application/json'}
-  body: dict = {"messages": [{"role": "system", "content": prompt},{"role": "user", "content": encoded_text}]}
+  body: dict = {"messages": [{"role": "system", "content": prompt},{"role": "user", "content": txt_translate}]}
   
   try:
     async with aiohttp_request.post(CLOUDFARE_URL, headers=headers, json=body) as resp:      
@@ -314,7 +332,7 @@ async def lingva_translate(txt_to_translate: str, aiohttp_request) -> str:
 
 # ::::: TRANSLATE :::::
 async def translate(md_article):
-  md_styles_pattern = r'^[!*\[$$-]'
+  md_styles_pattern = r'^[!\[$$-]'
    
   # --- Split in paragraphs ---
   org_chunks = [chunk for chunk in md_article.split("\n\n") if not re.match(md_styles_pattern, chunk)]
@@ -325,7 +343,7 @@ async def translate(md_article):
   # --- batch translate --
   async def rate_limit(chunk, aiohttp_request):
     async with semaphore:
-      return await lingva_translate(chunk, aiohttp_request)
+      return await cloudfare_translate(chunk, aiohttp_request)
   
   async with aiohttp.ClientSession() as aiohttp_request:
     trans_tasks = [rate_limit(org_chunk, aiohttp_request) for org_chunk in org_chunks]
@@ -334,7 +352,6 @@ async def translate(md_article):
     translated_map = dict(zip(org_chunks, trans_chunks))
     
     for original_chunk, translated_chunk in translated_map.items():
-      print(translated_chunk)
       md_article = md_article.replace(original_chunk, translated_chunk)
 
     return md_article
@@ -535,7 +552,7 @@ async def main(json_file: Path) -> None:
       title = await translate(title)
   
   # --- EDGE TTS ---
-    if voice_on:
+    if not voice_on:
       audio_filename = get_hash(title.encode('utf-8'))
       plain_text = convert_to_plaintext(md_article)
       text_to_voice(plain_text, audio_filename)
@@ -552,7 +569,7 @@ async def main(json_file: Path) -> None:
     save_to_file(title, note_templated)
   
   # --- DEL ARTICLE DOWNLOADED ---
-    delete_json(json_file)
+    #delete_json(json_file)
 
 # ====================================
 
@@ -576,3 +593,4 @@ if __name__ == "__main__":
   validate_dir_paths()
   get_urls()
   start_sync()
+  
