@@ -25,13 +25,14 @@ import re
 
 # ::::: TO-DO ::::::
 # ✔️ Add Translate
-# Add @click 
+# ✔️ @click 
 # add Download PDF' articles
 # ✔️ Add MS TTS EDGE
-# Check settings / paths 
+# ✔️ Check settings / paths 
 # Handle errors
-# Add tags function
+# ✔️ tags function
 # replace build_template to kwargs
+# Add detailed information during sync
 
 
 # ::::: LOAD SETTINGS :::::
@@ -45,7 +46,6 @@ with open(Path(__file__).parent.joinpath("Settings.yaml"), "r") as file:
   ARTICLES_SYNCED_DIR = Path(__file__).parent.joinpath("Done")
   TEMPLATE = Path(__file__).parent.joinpath("Template")
 
-  
   # --- Settings ---
   DATETIME_FORMAT = settings["OTHERS"]["DATETIME_FORMAT"]
   DEFAULT_LANGUAGE = settings["OTHERS"]["DEFAULT_LANGUAGE"]
@@ -55,28 +55,23 @@ with open(Path(__file__).parent.joinpath("Settings.yaml"), "r") as file:
   USERAGENT = settings["OTHERS"]["USERAGENT"]
   TTS_VOICE = settings["OTHERS"]["TTS_VOICE"]
   
-  # API
+  # --- API ---
   CLOUDFARE_URL = settings["API"]["CLOUDFARE_URL"]
   API_KEY = settings["API"]["API_KEY"]
   
-  # REGEX
+  # --- REGEX ---
   RULES_REGEX = settings["REGEX"]
-# ====================================
-
-
-# ::::: CHECK DIR EXISTS :::::
-def validate_dir_paths() -> None:
-  folders_to_check = [OFFLINE_DIR, ARTICLES_DIR, ATTACHMENTS_DIR, ARTICLES_SYNCED_DIR]
-  for folder in folders_to_check:
-    if not folder.exists():
-      folder.mkdir()
+  
+  for folder_path in   [OFFLINE_DIR, ARTICLES_DIR, ATTACHMENTS_DIR, ARTICLES_SYNCED_DIR]:
+    folder_path.mkdir(parents=True, exist_ok=True)
 # ====================================
 
 
 # ::::: GET JSON DATA :::::
-def get_json_data(json_file):
+def get_json_data(json_file) -> str:
   with open(json_file, "r") as f:
-    return json.load(f)
+    fills = json.load(f)
+    return fills["creation_date"], fills["url"], fills["voice"], fills["labels"], fills["regex"], fills["translate"]
 # ====================================
 
 
@@ -89,14 +84,14 @@ def get_json_data(json_file):
 @click.option("-r", "--regex", is_flag=True, help="Apply custom regular expressions")
 @click.option("-i", "--input-file", type=str, help="Save URLs from an external file")
 @click.option("-s", "--sync", is_flag=True, help="Start sync")
-def get_urls(**kwargs):
+def get_urls(**kwargs) -> None:
   params = kwargs
   
-  # --- add creation date --- 
+  # --- Add creation date --- 
   creation_date = {"creation_date": dt.now().strftime('%Y-%m-%d %H:%M')}
   params.update(creation_date)
   
-  # --- save urls from file
+  # --- Save urls from file
   input_file = params.get("input_file")
   
   if input_file:
@@ -110,7 +105,7 @@ def get_urls(**kwargs):
         save_change_to_file(url_params)
     print(f"{len(urls)} urls saved!")
 
-  # --- save single url ---
+  # --- Save single url ---
   elif params.get("url"):
     url = params.get("url")
     if validators.url(url):
@@ -120,9 +115,12 @@ def get_urls(**kwargs):
     else:
       print("url invalid")
   
+  elif params.get("sync"):
+    asyncio.run(start_sync())
+
   # --- Nothing else ---
   else:
-    asyncio.run(start_sync())
+    show_message("No items pending. Waiting for tasks...")
 # ====================================
 
 # :::::REMOVE TRACKING PARAMETERS :::::
@@ -134,7 +132,7 @@ def remove_tracking_param(url: str) -> str:
 
 
 # ::::: SAVE URL/S IN JSON :::::
-def save_change_to_file(params: dict):
+def save_change_to_file(params: dict) -> None:
   url = params.get("url").encode("utf-8")
   json_name = get_hash(url)
   full_path = OFFLINE_DIR.joinpath(f"{json_name}.json")
@@ -144,39 +142,12 @@ def save_change_to_file(params: dict):
 
 
 # ::::: LOAD URLS FROM FILE :::::
-def load_from_file(input_file: str):
+def load_from_file(input_file: str) -> list:
   with open(input_file, "r") as f:
     content = f.readlines()
     valid_urls = [url.strip() for url in content if validators.url(url.strip())]
   return valid_urls
 # ====================================
-
-
-
-"""
-# ::::: SAVE LINK :::::
-def save_link(url: str):
-  parsed = urlparse(url)
-  
-  if parsed.scheme and parsed.netloc:
-    creation_date = dt.now().strftime(DATETIME_FORMAT)
-    json_dict = {"url": url, "creation_date": creation_date}
-    name_file = get_hash(url.encode()) + ".json"
-    full_path = OFFLINE_DIR.joinpath(name_file)
-    with open(full_path, "w", encoding="utf-8") as f:
-      json.dump(json_dict, f, ensure_ascii=False, indent=4)
-    show_message("url saved!")
-  else:
-    show_message("Invalid URL")
-# ====================================
-"""
-
-
-# ::::: CLEAR THIS PAGE :::::
-def clear_this_page(link: str) -> str:
-  url_combined = f"https://clearthis.page/?u={link}"
-  return url_combined
-  # ====================================
 
 
 # ::::: GET WEB PAGE :::::
@@ -186,11 +157,12 @@ def load_web_site(url: str) -> str:
     return response
   except (requests.HTTPError, requests.ConnectionError, requests.Timeout) as e:
     show_message(str(e))
+    return False
 # ====================================
 
 
 # ::::: EXTRACT ARTICLE FROM HTML :::::
-def read_mode(html: str) -> str:
+def readability_mode(html: str) -> object:
   article_obj = Document(html)
   return article_obj
 # ====================================
@@ -220,49 +192,42 @@ def del_dupli_links(article: str, markdown_img) -> str:
 async def download_img_file(aiohttp_request, url_img: str) -> str:
   try:
     
-    if await is_url_img(url_img):
+    async with aiohttp_request.get(url_img, timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)) as result:
       
-      async with aiohttp_request.get(url_img, timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)) as result:
-        
-        # --- Get image file ---
-        img_obj = await result.read()
-        
-        # --- Get info image ---
-        img_extension = Path(urlparse(url_img).path).suffix.lower()
-        md5_img_name  = get_hash(img_obj) + img_extension
-        full_path = ATTACHMENTS_DIR.joinpath(md5_img_name)
-        
-        # --- Save image ---
-        with open(full_path, "wb") as img:
-          img.write(img_obj)
-            
-        return f"![[{md5_img_name}]]"
-    
-    else:
-      return url_img
+      # --- Get image file ---
+      img_obj = await result.read()
       
+      # --- Get info image ---
+      img_extension = Path(urlparse(url_img).path).suffix.lower()
+      md5_img_name  = get_hash(img_obj) + img_extension
+      full_path = ATTACHMENTS_DIR.joinpath(md5_img_name)
+      
+      # --- Save image ---
+      with open(full_path, "wb") as img:
+        img.write(img_obj)
+          
+      return f"![[{md5_img_name}]]"
+  
   except Exception: # if download fail 
     return f"![]({url_img})"
 # ====================================
 
 
 # ::::: CHECK IF IT'S AN IMG URL :::::
-async def is_url_img(url: str) -> bool:
+def is_url_img(url: str) -> bool:
   try:
-    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
-      async with session.head(url, allow_redirects=True) as response:
-        response.raise_for_status()
-        content_type = response.headers.get('content-type', '').split(';')[0].strip()
-        return content_type.startswith('image/')
+    response = requests.head(url, timeout=10, allow_redirects=True)
+    response.raise_for_status()
+    content_type = response.headers.get('content-type', '').split(';')[0].strip()
+    return content_type.startswith('image/')
   except Exception:
-      return False
+    return False
 # ====================================
 
 
 # ::::: BATCH DOWNLOAD :::::
 async def batch_img_download(article_content: str) -> str:
   bracket_pattern = r"^[!\[].+\)$"
-  #only_url_pattern = r"https?://[^\s\)]+(?:jpg|jpeg|png|webp|heic|avif|gif)[^\s\)]*"
   only_url_pattern = r"https://[^\s\)\]]+"
   new_line_pattern = r'(?<=\))(!\[\])(?=\()'
   
@@ -271,7 +236,7 @@ async def batch_img_download(article_content: str) -> str:
   
   # --- Mapping brackets_links ---
   if len(brackets_links) >= 1:
-    url_imgs: list = [only_url_img.group(0) for bracket in brackets_links if (only_url_img := re.search(only_url_pattern, bracket))]
+    url_imgs: list = [only_url_img.group(0) for bracket in brackets_links if (only_url_img := re.search(only_url_pattern, bracket)) and is_url_img(only_url_img.group(0))]
     
     async with aiohttp.ClientSession() as aiohttp_request:
       tasks = [download_img_file(aiohttp_request, url) for url in url_imgs]
@@ -331,7 +296,7 @@ async def lingva_translate(txt_to_translate: str, aiohttp_request) -> str:
 
 
 # ::::: TRANSLATE :::::
-async def translate(md_article):
+async def translate(md_article) -> str:
   md_styles_pattern = r'^[!\[$$-]'
    
   # --- Split in paragraphs ---
@@ -415,28 +380,6 @@ def delete_json(json_file: Path) -> None:
 # ====================================
 
 
-# ::::: CLEAN ATTACHMENTS DIR :::::
-def clean_attachments():
-  articles_dir = ARTICLES_DIR
-  attachments_dir = ATTACHMENTS_DIR
-  total_img_innotes = set()
-
-  article_files = {article for article in articles_dir.glob("*.md") if article.is_file()}
-  attachments_imgs = {img.name for img in attachments_dir.glob("*")}
-
-  pattern = re.compile(r"([a-f0-9]{32}\.(jpg|jpeg|png|webp|heic|avif|gif))")
-
-  for article in article_files:
-    with open(article, "r") as f:
-      article_content = f.read()
-      total_img_innotes.update([match.group(1) for match in pattern.finditer(article_content)])
-  
-  img_to_del = attachments_imgs - total_img_innotes
-  for img_name in img_to_del:
-    (attachments_dir / img_name).unlink()
-# ====================================
-
-
 # ::::: SHOW MESSAGES :::::
 def show_message(msg: str, sep="-") -> None:
   line = sep * len(msg)
@@ -511,34 +454,23 @@ def text_to_voice(text: str, name_file: str) -> None:
 
 
 # ::::: MAIN :::::
-logger.add("log.log", rotation="5 MB", level="DEBUG")
-@logger.catch
 async def main(json_file: Path) -> None:
   
   # --- JSON SETTINGS ---
-  article_params = get_json_data(json_file)
-  creation_date = article_params["creation_date"]
-  url = article_params["url"]
-  voice_on = article_params["voice"]
-  tags = article_params["labels"]
-  custom_rules = article_params["regex"]
-  translate_on = article_params["translate"]
-  
-  # --- CLEAR THIS PAGE --+ 
-  #url = clear_this_page(url)
-
+  creation_date, url, voice_on, tags, custom_rules, translate_on = get_json_data(json_file)
+    
   # --- HTML ---
-  html_page = load_web_site(url)
-  if html_page:
-    html_article = read_mode(html_page)
-    summary_article = html_article.summary(keep_all_images=True)
+  raw_html = load_web_site(url)
+  if raw_html:
+    readability_article = readability_mode(raw_html)
+    summary_article = readability_article.summary(keep_all_images=True)
 
   # --- MARKDOWN ---
     md_article = md(summary_article)
 
   # --- ARTICLE METADATA ---
-    author = html_article.author()
-    title = satanize_inline_title(html_article.title())
+    author = readability_article.author()
+    title = satanize_inline_title(readability_article.title())
     num_words = len(md_article.split(" "))
     read_time = num_words // WPM
   
@@ -569,7 +501,7 @@ async def main(json_file: Path) -> None:
     save_to_file(title, note_templated)
   
   # --- DEL ARTICLE DOWNLOADED ---
-    #delete_json(json_file)
+    delete_json(json_file)
 
 # ====================================
 
@@ -583,14 +515,10 @@ async def start_sync() -> None:
   if len(json_files) >= 1:
     await asyncio.gather(*(main(file_path) for file_path in json_files))
   else:
-    show_message("Nothing to synchronize")
+    show_message("Nothing to sync")
 # ====================================
 
 
-
-
 if __name__ == "__main__":
-  validate_dir_paths()
   get_urls()
-  start_sync()
   
