@@ -6,20 +6,16 @@ from readability import Document
 from aiohttp import ClientError
 from urllib.parse import quote
 from pathlib import Path
-from loguru import logger
+import questionary
 import validators
-import threading
 import edge_tts
 import requests
 import hashlib
 import aiohttp
 import asyncio
-import base64
 import click
 import yaml
-import random
 import json
-import time
 import re
 
 
@@ -39,39 +35,74 @@ import re
 with open(Path(__file__).parent.joinpath("Settings.yaml"), "r") as file:
   settings = yaml.safe_load(file)
 
-  # --- Paths ----
-  OFFLINE_DIR = Path(__file__).parent.joinpath("Offline")
-  ARTICLES_DIR = Path(settings["PATHS"]["ARTICLES_DIR"])
-  ATTACHMENTS_DIR = Path(settings["PATHS"]["ATTACHMENTS_DIR"])
-  ARTICLES_SYNCED_DIR = Path(__file__).parent.joinpath("Done")
-  TEMPLATE = Path(__file__).parent.joinpath("Template")
+# --- Paths ----
+OFFLINE_DIR = Path(__file__).parent.joinpath("Offline")
+ARTICLES_DIR = Path(settings["PATHS"]["ARTICLES_DIR"])
+ATTACHMENTS_DIR = Path(settings["PATHS"]["ATTACHMENTS_DIR"])
+ARTICLES_SYNCED_DIR = Path(__file__).parent.joinpath("Done")
+TEMPLATE = Path(__file__).parent.joinpath("Template")
 
-  # --- Settings ---
-  DATETIME_FORMAT = settings["OTHERS"]["DATETIME_FORMAT"]
-  DEFAULT_LANGUAGE = settings["OTHERS"]["DEFAULT_LANGUAGE"]
-  REQUEST_TIMEOUT = settings["OTHERS"]["REQUEST_TIMEOUT"]
-  WPM = settings["OTHERS"]["WPM"]
-  DEL_SYNCED_ARTICLES = settings["OTHERS"]["DEL_SYNCED_ARTICLES"]
-  USERAGENT = settings["OTHERS"]["USERAGENT"]
-  TTS_VOICE = settings["OTHERS"]["TTS_VOICE"]
-  
-  # --- API ---
-  CLOUDFARE_URL = settings["API"]["CLOUDFARE_URL"]
-  API_KEY = settings["API"]["API_KEY"]
-  
-  # --- REGEX ---
-  RULES_REGEX = settings["REGEX"]
-  
-  for folder_path in   [OFFLINE_DIR, ARTICLES_DIR, ATTACHMENTS_DIR, ARTICLES_SYNCED_DIR]:
-    folder_path.mkdir(parents=True, exist_ok=True)
+# --- Settings ---
+DATETIME_FORMAT = settings["OTHERS"]["DATETIME_FORMAT"]
+DEFAULT_LANGUAGE = settings["OTHERS"]["DEFAULT_LANGUAGE"]
+REQUEST_TIMEOUT = settings["OTHERS"]["REQUEST_TIMEOUT"]
+WPM = settings["OTHERS"]["WPM"]
+DEL_SYNCED_ARTICLES = settings["OTHERS"]["DEL_SYNCED_ARTICLES"]
+USERAGENT = settings["OTHERS"]["USERAGENT"]
+TTS_VOICE = settings["OTHERS"]["TTS_VOICE"]
+
+# --- PARAM DEFAULTS ----
+PARAM_DEFAULTS = settings["PARAM_DEFAULTS"]
+
+# --- API ---
+CLOUDFARE_URL = settings["API"]["CLOUDFARE_URL"]
+API_KEY = settings["API"]["API_KEY"]
+
+# --- REGEX ---
+RULES_REGEX = settings["REGEX"]
+
+# --- CHECK FOLDERS ---
+for folder_path in   [OFFLINE_DIR, ARTICLES_DIR, ATTACHMENTS_DIR, ARTICLES_SYNCED_DIR]:
+  folder_path.mkdir(parents=True, exist_ok=True)
 # ====================================
 
 
 # ::::: GET JSON DATA :::::
-def get_json_data(json_file) -> str:
+def get_json_data(json_file: Path) -> str:
   with open(json_file, "r") as f:
-    fills = json.load(f)
-    return fills["creation_date"], fills["url"], fills["voice"], fills["labels"], fills["regex"], fills["translate"]
+    json_fields = json.load(f)
+    return json_fields["creation_date"], json_fields["url"], json_fields["voice"], json_fields["labels"], json_fields["regex"], json_fields["translate"]
+# ====================================
+
+
+# ::::: UI CLI :::::
+def menu_ui() -> None:
+    action = questionary.select(
+        "What do you want to do?",
+        choices=[
+            "1. Sync articles",
+            "2. View saved articles",
+            "3. Add URL",
+            "4. Exit"
+        ]
+    ).ask()
+
+    match action:
+      case "1. Sync articles": asyncio.run(start_sync())
+      case "2. View saved articles":   view_articles()
+      case "3. Add URL":               menu_add_url()   # 
+      case "4. Exit":  exit()
+
+
+def menu_add_url() -> None:
+  option = questionary.select(
+      "How do you want to add it?",
+      choices=["1. Single URL", "2. From file"]
+  ).ask()
+
+  match option:
+      case "1. Single URL": save_single_url(input("Entered the url: "), PARAM_DEFAULTS)
+      case "2. From file":  save_multiples_url(input("Entered the file path: "), PARAM_DEFAULTS)
 # ====================================
 
 
@@ -84,37 +115,21 @@ def get_json_data(json_file) -> str:
 @click.option("-r", "--regex", is_flag=True, help="Apply custom regular expressions")
 @click.option("-i", "--input-file", type=str, help="Save URLs from an external file")
 @click.option("-s", "--sync", is_flag=True, help="Start sync")
-def get_urls(**kwargs) -> None:
+def handle_cli(**kwargs) -> None:
   params = kwargs
   
-  # --- Add creation date --- 
-  creation_date = {"creation_date": dt.now().strftime('%Y-%m-%d %H:%M')}
-  params.update(creation_date)
-  
-  # --- Save urls from file
+  # --- Save urls from file ---
   input_file = params.get("input_file")
   
   if input_file:
-    urls = load_from_file(input_file)
-    for url in urls:
-      if validators.url(url):
-        url = remove_tracking_param(url)
-        url_params = params.copy()
-        url_params["url"] = url
-        del url_params["input_file"]
-        save_change_to_file(url_params)
-    print(f"{len(urls)} urls saved!")
+    save_multiples_url(input_file, params)
 
   # --- Save single url ---
   elif params.get("url"):
     url = params.get("url")
-    if validators.url(url):
-      params["url"] = remove_tracking_param(url)
-      save_change_to_file(params)
-      print("url saved!")
-    else:
-      print("url invalid")
+    save_single_url(url, params)
   
+  # --- Start sync ---
   elif params.get("sync"):
     asyncio.run(start_sync())
 
@@ -123,30 +138,57 @@ def get_urls(**kwargs) -> None:
     show_message("No items pending. Waiting for tasks...")
 # ====================================
 
+
+# ::::: SAVE MULTIPLE URLS FROM CLI :::::
+def save_multiples_url(input_file: str, params: dict) -> None:
+  
+  # --- Load urls from file ---
+  with open(input_file, "r") as f:
+    content = f.readlines()
+    valid_urls = [remove_tracking_param(url.strip()) for url in content if validators.url(url.strip())]
+  
+  # --- Save each url ---
+  for url in valid_urls:
+    unique_params = params.copy()
+    creation_date = {"creation_date": dt.now().strftime('%Y-%m-%d %H:%M')}
+    unique_params.update(creation_date)
+    unique_params["url"] = url
+    #del unique_params["input_file"]
+    save_changes_on_file(unique_params)
+  print(f"{len(valid_urls)} urls saved!")
+# ====================================
+
+
+# ::::: SAVE ONE URL :::::
+def save_single_url(url: str, params: dict) -> None:
+  if not validators.url(url):
+    show_message("Invalid url")
+    return
+  
+  creation_date = {"creation_date": dt.now().strftime('%Y-%m-%d %H:%M')}
+  params.update(creation_date)
+  params["url"] = remove_tracking_param(url)
+  save_changes_on_file(params)
+  print("url saved!")
+# ====================================
+
+
 # :::::REMOVE TRACKING PARAMETERS :::::
 def remove_tracking_param(url: str) -> str:
-  tracking_regex = r"\?utm.*"
+  tracking_regex = r"\?utm.+"
   url = re.sub(tracking_regex, "", url)
   return url
 # ====================================
 
 
-# ::::: SAVE URL/S IN JSON :::::
-def save_change_to_file(params: dict) -> None:
+# ::::: SAVE PARAMETERS IN JSON :::::
+def save_changes_on_file(params: dict) -> None:
   url = params.get("url").encode("utf-8")
   json_name = get_hash(url)
   full_path = OFFLINE_DIR.joinpath(f"{json_name}.json")
+  
   with open(full_path, "w", encoding="utf-8") as f:
         json.dump(params, f, ensure_ascii=False, indent=4)
-# ====================================
-
-
-# ::::: LOAD URLS FROM FILE :::::
-def load_from_file(input_file: str) -> list:
-  with open(input_file, "r") as f:
-    content = f.readlines()
-    valid_urls = [url.strip() for url in content if validators.url(url.strip())]
-  return valid_urls
 # ====================================
 
 
@@ -157,12 +199,11 @@ def load_web_site(url: str) -> str:
     return response
   except (requests.HTTPError, requests.ConnectionError, requests.Timeout) as e:
     show_message(str(e))
-    return False
 # ====================================
 
 
 # ::::: EXTRACT ARTICLE FROM HTML :::::
-def readability_mode(html: str) -> object:
+def readability_mode(html: str) -> Document:
   article_obj = Document(html)
   return article_obj
 # ====================================
@@ -263,8 +304,7 @@ def satanize_inline_title(title: str) -> str:
 
 # ::::: CLOUDFARE AI TRANSLATE :::::
 async def cloudfare_translate(txt_translate: str, aiohttp_request) -> str:
-  encoded_text = base64.b64encode(txt_translate.encode('utf-8')).decode('ascii')
-  prompt = f"Eres un traductor experto. Tu única respuesta debe ser la traducción exacta del texto del usuario al idioma {DEFAULT_LANGUAGE}, sin ninguna explicación, saludo, prefacio ni texto adicional. Solo la traducción."
+  prompt = f"You're an expert translator. Your only response must be the exact translation of the user's text into the {DEFAULT_LANGUAGE} language, without any explanation, greeting, preface, or extra text. Just the translation."
   headers: dict = {'Authorization': f'Bearer {API_KEY}', 'Content-Type': 'application/json'}
   body: dict = {"messages": [{"role": "system", "content": prompt},{"role": "user", "content": txt_translate}]}
   
@@ -303,7 +343,7 @@ async def translate(md_article) -> str:
   org_chunks = [chunk for chunk in md_article.split("\n\n") if not re.match(md_styles_pattern, chunk)]
   
   # --- Limit tasks ---
-  semaphore = asyncio.Semaphore(4)
+  semaphore = asyncio.Semaphore(3)
   
   # --- batch translate --
   async def rate_limit(chunk, aiohttp_request):
@@ -341,19 +381,20 @@ def save_to_file(name_file: str, content: str) -> None:
 
 # ::::: FORMAT TAGS :::::
 def format_tags(tags: str) -> str:
-  x_tags = tags.split(",")
-  return "\n" + "".join(f"  - {i}\n" for i in x_tags)
+  if tags:
+    x_tags = tags.split(",")
+    return "\n" + "".join(f"  - {i}\n" for i in x_tags)
 # ====================================
 
 
 # ::::: BUILD TEMPLATE :::::
-def build_template(creation_date, author, title, num_words, read_time, full_note, url, tags, audio) -> str:
+def build_template(creation_date: str, author: str, title: str, num_words: int, read_time: str, note_with_img: str, url: str, tags: list, audio: str) -> str:
   metadata = {
   "%CREATIONDATE": creation_date,
   "%AUTHOR": author if  author != "[no-author]" else "Unknown",
   "%WORDS": num_words,
   "%READTIME": f"{read_time} minutes",
-  "%ARTICLE": full_note,
+  "%ARTICLE": note_with_img,
   "%URL": url,
   "%TAGS": format_tags(tags) if tags else "",
   "%AUDIO": f"![[{audio}.mp3]]" if audio is not None else ""
@@ -383,7 +424,7 @@ def delete_json(json_file: Path) -> None:
 # ::::: SHOW MESSAGES :::::
 def show_message(msg: str, sep="-") -> None:
   line = sep * len(msg)
-  print(f"{line}\n{msg}\n{line}", end="\r")
+  print(f"\r{msg}", end="", flush=True)
 # ====================================
 
 
@@ -426,16 +467,11 @@ def convert_to_plaintext(text: str) -> str:
   # BLOCKQUOTES
   text = re.sub(r'^>\s+', '', text, flags=re.MULTILINE)
   
-  
   # CALLOUTS
   text = re.sub(r'\[![\w]+\]', '', text)
   
   # EMBEDS
   text = re.sub(r'!\[\[.*?\]\]', '', text)
-  
-  # IMAGES
-  text = re.sub(r'!\[([^\]]*)\]\([^\)]+\)', '', text)
-  text = re.sub(r'!\[([^\]]*)\]', '', text)
   
   # URLS
   text = re.sub(r'https?://[^\s]+', '', text)
@@ -455,13 +491,18 @@ def text_to_voice(text: str, name_file: str) -> None:
 
 # ::::: MAIN :::::
 async def main(json_file: Path) -> None:
-  
+  show_message("Sync started...")
+
   # --- JSON SETTINGS ---
   creation_date, url, voice_on, tags, custom_rules, translate_on = get_json_data(json_file)
     
   # --- HTML ---
+  show_message(f"Downloading: {url}")
   raw_html = load_web_site(url)
-  if raw_html:
+  
+  if not raw_html:
+    show_message(f"Error downloading {url}")
+  else:
     readability_article = readability_mode(raw_html)
     summary_article = readability_article.summary(keep_all_images=True)
 
@@ -480,22 +521,26 @@ async def main(json_file: Path) -> None:
   
   # --- TRANSLATE --- 
     if translate_on and detect(md_article) != DEFAULT_LANGUAGE:
+      show_message(f"translating: {title}\n")
       md_article = await translate(md_article)
       title = await translate(title)
   
   # --- EDGE TTS ---
-    if not voice_on:
+    if voice_on:
+      show_message("Recording the article's audio")
       audio_filename = get_hash(title.encode('utf-8'))
       plain_text = convert_to_plaintext(md_article)
-      text_to_voice(plain_text, audio_filename)
+      
+      await asyncio.to_thread(text_to_voice, plain_text, audio_filename)
+
     else:
       audio_filename = None
   
   # --- IMAGES ---
-    full_note = await batch_img_download(md_article)
+    note_with_img = await batch_img_download(md_article)
   
   # --- BUILD TEMPLATE ---
-    note_templated = build_template(creation_date, author, title, num_words, read_time, full_note, url, tags, audio_filename)
+    note_templated = build_template(creation_date, author, title, num_words, read_time, note_with_img, url, tags, audio_filename)
   
   # --- SAVE FILE ---
     save_to_file(title, note_templated)
@@ -508,17 +553,22 @@ async def main(json_file: Path) -> None:
 
 # :::::QUEUE ARTICLES :::::
 async def start_sync() -> None:
-  show_message("Sync started...")
-  
   json_files = list(OFFLINE_DIR.glob("*.json"))
+  
+  if not json_files:
+    show_message("Nothing to sync\n")
+    return
+  
+  semaphore = asyncio.Semaphore(3)
+  
+  async def limited_process(file_path):
+        async with semaphore:
+            await main(file_path)
 
-  if len(json_files) >= 1:
-    await asyncio.gather(*(main(file_path) for file_path in json_files))
-  else:
-    show_message("Nothing to sync")
+  await asyncio.gather(*(limited_process(f) for f in json_files))
 # ====================================
 
 
 if __name__ == "__main__":
-  get_urls()
-  
+  menu_ui()
+  #handle_cli()
