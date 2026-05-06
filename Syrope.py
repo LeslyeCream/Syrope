@@ -6,6 +6,9 @@ from readability import Document
 from aiohttp import ClientError
 from urllib.parse import quote
 from pathlib import Path
+from rich.console import Console 
+from rich.table import Table
+from progress.bar import ShadyBar
 import questionary
 import validators
 import edge_tts
@@ -76,33 +79,68 @@ def get_json_data(json_file: Path) -> str:
 
 
 # ::::: UI CLI :::::
-def menu_ui() -> None:
-    action = questionary.select(
-        "What do you want to do?",
-        choices=[
-            "1. Sync articles",
-            "2. View saved articles",
-            "3. Add URL",
-            "4. Exit"
-        ]
-    ).ask()
+def main_ui() -> None:
+  action = questionary.select(
+      "What do you want to do?",
+      choices=[
+          "1. Sync articles",
+          "2. View saved articles",
+          "3. Add URL",
+          "4. Exit"
+      ]
+  ).ask()
 
-    match action:
-      case "1. Sync articles": asyncio.run(start_sync())
-      case "2. View saved articles":   view_articles()
-      case "3. Add URL":               menu_add_url()   # 
-      case "4. Exit":  exit()
+  match action:
+    case "1. Sync articles": asyncio.run(start_sync())
+    case "2. View saved articles": view_saved_articles()
+    case "3. Add URL": menu_add_url()
+    case "4. Exit":  exit()
+# ====================================
 
 
+# ::::: Menu  :::::
 def menu_add_url() -> None:
   option = questionary.select(
       "How do you want to add it?",
-      choices=["1. Single URL", "2. From file"]
+      choices=["1. Single URL", "2. From file", "3. Back"]
   ).ask()
 
   match option:
       case "1. Single URL": save_single_url(input("Entered the url: "), PARAM_DEFAULTS)
       case "2. From file":  save_multiples_url(input("Entered the file path: "), PARAM_DEFAULTS)
+      case "3. Back": main_ui()
+# ====================================
+
+
+# ::::: TABLE - VIEW SAVED LINKS :::::
+def view_saved_articles() -> None:
+    
+  # --- Get article list ---
+  saved_links = []
+  json_files = list(OFFLINE_DIR.glob("*.json"))
+  
+  saved_links = [(data[1], data[0]) for json_f in json_files if (data := get_json_data(json_f))]
+  
+  # --- Show Table ---
+  table = Table(title="Links saved", show_lines=True)
+  table.add_column("Url", style="cyan")
+  table.add_column("Created", style="yellow")
+
+  for link, creation_date in saved_links:
+    table.add_row(link, str(creation_date))
+  
+  console = Console()
+  
+  console.print(table)
+  
+  # --- Actions ---
+  action = questionary.select("Choose an option:", choices=["Back", "Exit"]).ask()
+
+  if action == "Back":
+    main_ui()
+  
+  elif action == "Exit":
+    exit()
 # ====================================
 
 
@@ -115,7 +153,7 @@ def menu_add_url() -> None:
 @click.option("-r", "--regex", is_flag=True, help="Apply custom regular expressions")
 @click.option("-i", "--input-file", type=str, help="Save URLs from an external file")
 @click.option("-s", "--sync", is_flag=True, help="Start sync")
-def handle_cli(**kwargs) -> None:
+def main_cli(**kwargs) -> None:
   params = kwargs
   
   # --- Save urls from file ---
@@ -423,7 +461,6 @@ def delete_json(json_file: Path) -> None:
 
 # ::::: SHOW MESSAGES :::::
 def show_message(msg: str, sep="-") -> None:
-  line = sep * len(msg)
   print(f"\r{msg}", end="", flush=True)
 # ====================================
 
@@ -491,13 +528,11 @@ def text_to_voice(text: str, name_file: str) -> None:
 
 # ::::: MAIN :::::
 async def main(json_file: Path) -> None:
-  show_message("Sync started...")
 
   # --- JSON SETTINGS ---
   creation_date, url, voice_on, tags, custom_rules, translate_on = get_json_data(json_file)
     
   # --- HTML ---
-  show_message(f"Downloading: {url}")
   raw_html = load_web_site(url)
   
   if not raw_html:
@@ -521,13 +556,11 @@ async def main(json_file: Path) -> None:
   
   # --- TRANSLATE --- 
     if translate_on and detect(md_article) != DEFAULT_LANGUAGE:
-      show_message(f"translating: {title}\n")
       md_article = await translate(md_article)
       title = await translate(title)
   
   # --- EDGE TTS ---
     if voice_on:
-      show_message("Recording the article's audio")
       audio_filename = get_hash(title.encode('utf-8'))
       plain_text = convert_to_plaintext(md_article)
       
@@ -560,7 +593,7 @@ async def start_sync() -> None:
     return
   
   semaphore = asyncio.Semaphore(3)
-  
+
   async def limited_process(file_path):
         async with semaphore:
             await main(file_path)
@@ -570,5 +603,5 @@ async def start_sync() -> None:
 
 
 if __name__ == "__main__":
-  menu_ui()
-  #handle_cli()
+  main_ui()
+  #main_cli()
