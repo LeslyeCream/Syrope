@@ -6,7 +6,9 @@ from readability import Document
 from aiohttp import ClientError
 from urllib.parse import quote
 from pathlib import Path
-from rich.console import Console 
+from rich import print
+from rich.console import Console
+from rich.traceback import install
 from rich.table import Table
 from progress.bar import ShadyBar
 import questionary
@@ -25,13 +27,20 @@ import re
 # ::::: TO-DO ::::::
 # ✔️ Add Translate
 # ✔️ @click 
-# add Download PDF' articles
+# Add Download PDF' articles
 # ✔️ Add MS TTS EDGE
 # ✔️ Check settings / paths 
 # Handle errors
-# ✔️ tags function
+# ✔️ Tags function
 # replace build_template to kwargs
-# Add detailed information during sync
+# ✔️ Add detailed information during sync
+# Apply regex to titles
+# Only create audio if the article length is < n
+# ====================================
+
+
+# --- Trackback handler ---
+install(show_locals=True)
 
 
 # ::::: LOAD SETTINGS :::::
@@ -78,8 +87,8 @@ def get_json_data(json_file: Path) -> str:
 # ====================================
 
 
-# ::::: UI CLI :::::
-def main_ui() -> None:
+# ::::: TUI - MAIN :::::
+def main_tui() -> None:
   action = questionary.select(
       "What do you want to do?",
       choices=[
@@ -98,49 +107,51 @@ def main_ui() -> None:
 # ====================================
 
 
-# ::::: Menu  :::::
+# ::::: TUI - ADD URL :::::
 def menu_add_url() -> None:
   option = questionary.select(
-      "How do you want to add it?",
-      choices=["1. Single URL", "2. From file", "3. Back"]
-  ).ask()
+      "How do you want to add it?", choices=["1. Single URL", "2. From file", "3. Back"]).ask()
 
   match option:
       case "1. Single URL": save_single_url(input("Entered the url: "), PARAM_DEFAULTS)
       case "2. From file":  save_multiples_url(input("Entered the file path: "), PARAM_DEFAULTS)
-      case "3. Back": main_ui()
+      case "3. Back": main_tui()
 # ====================================
 
 
-# ::::: TABLE - VIEW SAVED LINKS :::::
+# ::::: TUI - VIEW SAVED LINKS :::::
 def view_saved_articles() -> None:
     
   # --- Get article list ---
   saved_links = []
   json_files = list(OFFLINE_DIR.glob("*.json"))
   
-  saved_links = [(data[1], data[0]) for json_f in json_files if (data := get_json_data(json_f))]
+  if len(json_files) < 1:
+    show_message(f"No items saved")
   
-  # --- Show Table ---
-  table = Table(title="Links saved", show_lines=True)
-  table.add_column("Url", style="cyan")
-  table.add_column("Created", style="yellow")
-
-  for link, creation_date in saved_links:
-    table.add_row(link, str(creation_date))
+  else:
+    saved_links = [(data[1], data[0]) for json_f in json_files if (data := get_json_data(json_f))]
+    
+    # --- Show Table ---
+    table = Table(title="Links saved", show_lines=True)
+    table.add_column("Url", style="cyan")
+    table.add_column("Created", style="yellow")
   
-  console = Console()
+    for link, creation_date in saved_links:
+      table.add_row(link, str(creation_date))
+    
+    console = Console()
+    
+    console.print(table)
+    
+    # --- Actions ---
+    action = questionary.select("Choose an option:", choices=["Back", "Exit"]).ask()
   
-  console.print(table)
-  
-  # --- Actions ---
-  action = questionary.select("Choose an option:", choices=["Back", "Exit"]).ask()
-
-  if action == "Back":
-    main_ui()
-  
-  elif action == "Exit":
-    exit()
+    if action == "Back":
+      main_tui()
+    
+    elif action == "Exit":
+      exit()
 # ====================================
 
 
@@ -173,7 +184,7 @@ def main_cli(**kwargs) -> None:
 
   # --- Nothing else ---
   else:
-    show_message("No items pending. Waiting for tasks...")
+    main_tui()
 # ====================================
 
 
@@ -207,7 +218,7 @@ def save_single_url(url: str, params: dict) -> None:
   params.update(creation_date)
   params["url"] = remove_tracking_param(url)
   save_changes_on_file(params)
-  print("url saved!")
+  print("Url saved!")
 # ====================================
 
 
@@ -270,7 +281,6 @@ def del_dupli_links(article: str, markdown_img) -> str:
 # ::::: DOWNLOAD AND SAVE IMAGE :::::
 async def download_img_file(aiohttp_request, url_img: str) -> str:
   try:
-    
     async with aiohttp_request.get(url_img, timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)) as result:
       
       # --- Get image file ---
@@ -334,7 +344,7 @@ async def batch_img_download(article_content: str) -> str:
 
 # ::::: Satanize INLINE TITLE :::::
 def satanize_inline_title(title: str) -> str:
-  pattern = re.compile(r'[\[\]#"^\|\\/:*?¿<>]')
+  pattern = re.compile(r'[^\w\s\-.,()&!;@]')
   clean_title: str = pattern.sub("", title)
   return clean_title
 # ====================================
@@ -342,7 +352,7 @@ def satanize_inline_title(title: str) -> str:
 
 # ::::: CLOUDFARE AI TRANSLATE :::::
 async def cloudfare_translate(txt_translate: str, aiohttp_request) -> str:
-  prompt = f"You're an expert translator. Your only response must be the exact translation of the user's text into the {DEFAULT_LANGUAGE} language, without any explanation, greeting, preface, or extra text. Just the translation."
+  prompt = f"You're translator. Your only response must be the exact translation of the user's text into the {DEFAULT_LANGUAGE} language, without any explanation, greeting, preface, or extra text. Just the translation."
   headers: dict = {'Authorization': f'Bearer {API_KEY}', 'Content-Type': 'application/json'}
   body: dict = {"messages": [{"role": "system", "content": prompt},{"role": "user", "content": txt_translate}]}
   
@@ -461,7 +471,7 @@ def delete_json(json_file: Path) -> None:
 
 # ::::: SHOW MESSAGES :::::
 def show_message(msg: str, sep="-") -> None:
-  print(f"\r{msg}", end="", flush=True)
+  print(f"\n{msg}")
 # ====================================
 
 
@@ -531,10 +541,13 @@ async def main(json_file: Path) -> None:
 
   # --- JSON SETTINGS ---
   creation_date, url, voice_on, tags, custom_rules, translate_on = get_json_data(json_file)
-    
+  
+  # --- Show progress ---
+  show_message(f"Downloading... {url}")
+  
   # --- HTML ---
   raw_html = load_web_site(url)
-  
+
   if not raw_html:
     show_message(f"Error downloading {url}")
   else:
@@ -557,7 +570,7 @@ async def main(json_file: Path) -> None:
   # --- TRANSLATE --- 
     if translate_on and detect(md_article) != DEFAULT_LANGUAGE:
       md_article = await translate(md_article)
-      title = await translate(title)
+      title = satanize_inline_title(await translate(title))  
   
   # --- EDGE TTS ---
     if voice_on:
@@ -592,16 +605,24 @@ async def start_sync() -> None:
     show_message("Nothing to sync\n")
     return
   
+  # --- Set limit tasks ---
   semaphore = asyncio.Semaphore(3)
-
-  async def limited_process(file_path):
-        async with semaphore:
+  
+  # --- Show estatus ---
+  console = Console()
+  with console.status("[bold yellow]Downloading articles..."):
+    
+    # --- download task ---
+    async def limited_process(file_path):
+          async with semaphore:
             await main(file_path)
-
-  await asyncio.gather(*(limited_process(f) for f in json_files))
+            console.log("[green]✓[/green] [yellow]Article downloaded[yellow/]")
+    
+    await asyncio.gather(*(limited_process(f) for f in json_files))
+  
+  console.log("[bold green]All files synced!")
 # ====================================
 
 
 if __name__ == "__main__":
-  main_ui()
-  #main_cli()
+  main_cli()
