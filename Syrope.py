@@ -345,7 +345,7 @@ async def batch_img_download(article_content: str) -> str:
 
 
 # ::::: Satanize INLINE TITLE :::::
-def satanize_inline_title(title: str) -> str:
+def sstanize_text(title: str) -> str:
   pattern = re.compile(r'[^\w\s\-.,()&!;@]')
   clean_title: str = pattern.sub("", title)
   return clean_title
@@ -438,16 +438,17 @@ def format_tags(tags: str) -> str:
 
 
 # ::::: BUILD TEMPLATE :::::
-def build_template(creation_date: str, author: str, title: str, num_words: int, read_time: str, note_with_img: str, url: str, tags: list, audio: str) -> str:
+def build_template(creation_date: str, author: str, title: str, num_words: int, read_time: str, note_with_img: str, url: str, tags: list, audio: str, external_resources: str) -> str:
   metadata = {
   "%CREATIONDATE": creation_date,
-  "%AUTHOR": author if  author != "[no-author]" else "Unknown",
+  "%AUTHOR": satanize_txt(author) if  author != "[no-author]" else "Unknown",
   "%WORDS": num_words,
   "%READTIME": f"{read_time} minutes",
   "%ARTICLE": note_with_img,
   "%URL": url,
   "%TAGS": format_tags(tags) if tags else "",
-  "%AUDIO": f"![[{audio}.mp3]]" if audio is not None else ""
+  "%AUDIO": f"![[{audio}.mp3]]" if audio is not None else "",
+  "%RESOURCES": external_resources if external_resources is not None else ""
   }
 
   with open(TEMPLATE, "r") as f:
@@ -539,6 +540,26 @@ def text_to_voice(text: str, name_file: str) -> None:
 # ====================================
 
 
+# ::::: BUILD SUBLIST RESOURCES :::::
+def build_sublist_resources():
+  pdf_name = pdf.split("/")[-1]
+  format_name = pdf_name.replace("-", " ") if not pdf_name[0].isdigit else pdf_name
+  return f"\t - [{format_name}]({pdf})\n"
+# ====================================
+
+
+# ::::: GROUP ARTICLE RESOURCES :::::
+def gather_pdfs(text : str) -> str:
+  pdf_regex = r"https?://(?:www\.)?[^\s/$.?#].[^\s]*\.pdf(?:\?[^\s]*)?(?:#[^\s]*)?"
+  valid_pdfs = re.findall(pdf_regex, text, re.MULTILINE)
+
+  if not valid_pdfs:
+    pdf_sublist = [build_sublist_resources(pdf) for pdf in valid_pdfs]
+    header = f"- Papers cited in this article:\n"
+    return header + "".join(pdf_sublist)
+# ====================================
+
+
 # ::::: MAIN :::::
 async def main(json_file: Path, progress, task_id) -> None:
 
@@ -553,6 +574,7 @@ async def main(json_file: Path, progress, task_id) -> None:
 
   if not raw_html:
     show_message(f"Error downloading {url}")
+  
   else:
     progress.update(task_id, advance=5)
     progress.update(task_id, description=f"[cyan]Extracting[/cyan] article")
@@ -568,7 +590,7 @@ async def main(json_file: Path, progress, task_id) -> None:
 
   # --- ARTICLE METADATA ---
     author = readability_article.author()
-    title = satanize_inline_title(readability_article.title())
+    title = sstanize_text(readability_article.title())
     num_words = len(md_article.split(" "))
     read_time = num_words // WPM
 
@@ -587,7 +609,7 @@ async def main(json_file: Path, progress, task_id) -> None:
 
 
       md_article = await translate(md_article)
-      title = satanize_inline_title(await translate(title))  
+      title = sstanize_text(await translate(title))  
 
   # --- EDGE TTS ---
     if voice_on and read_time < READING_THRESHOLD:
@@ -603,16 +625,22 @@ async def main(json_file: Path, progress, task_id) -> None:
       audio_filename = None
 
   # --- IMAGES ---
-    progress.update(task_id, advance=25)
+    progress.update(task_id, advance=20)
     progress.update(task_id, description=f"[cyan]Downloading[/cyan] images")
 
     note_with_img = await batch_img_download(md_article)
 
-  # --- BUILD TEMPLATE ---
+  # --- GROUP RESOURCES ---
+    progress.update(task_id, advance=5)
+    progress.update(task_id, description=f"[cyan]Extracting[/cyan] resources")
+
+    external_resources = gather_resources(md_article)
+    
+    # --- BUILD TEMPLATE ---
     progress.update(task_id, advance=5)
     progress.update(task_id, description=f"[cyan]Building[/cyan] template")
 
-    note_templated = build_template(creation_date, author, title, num_words, read_time, note_with_img, url, tags, audio_filename)
+    note_templated = build_template(creation_date, author, title, num_words, read_time, note_with_img, url, tags, audio_filename, external_resources)
 
   # --- SAVE FILE ---
     progress.update(task_id, advance=5)
