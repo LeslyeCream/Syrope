@@ -1,4 +1,5 @@
 from markdownify import markdownify as md
+from markdown_plain_text.extention import convert_to_plain_text
 from langdetect import detect
 from datetime import datetime as dt
 from urllib.parse import urlparse
@@ -184,7 +185,7 @@ def main_cli(**kwargs) -> None:
   elif params.get("sync"):
     asyncio.run(start_sync())
 
-  # --- Nothing else ---
+  # --- TUI ---
   else:
     main_tui()
 # ====================================
@@ -441,7 +442,7 @@ def format_tags(tags: str) -> str:
 def build_template(creation_date: str, author: str, title: str, num_words: int, read_time: str, note_with_img: str, url: str, tags: list, audio: str, external_resources: str) -> str:
   metadata = {
   "%CREATIONDATE": creation_date,
-  "%AUTHOR": sanatize_text(author) if  author != "[no-author]" else "Unknown",
+  "%AUTHOR": satanize_text(author) if  author != "[no-author]" else "Unknown",
   "%WORDS": num_words,
   "%READTIME": f"{read_time} minutes",
   "%ARTICLE": note_with_img,
@@ -479,59 +480,6 @@ def show_message(msg: str, custom_style="Bold") -> None:
 # ====================================
 
 
-# ::::: CONVERT TO PLAINTEXT :::::
-def convert_to_plaintext(text: str) -> str:
-
-  # HEADERS
-  text = re.sub(r'^#{1,6}\s+', '', text, flags=re.MULTILINE)
-
-  # CODE BLOCKS
-  text = re.sub(r'```[\s\S]*?```', '', text)
-
-  # INLINE
-  text = re.sub(r'`([^`]+)`', r'\1', text)
-
-  # BOLD
-  text = re.sub(r'\*\*([^\*]+)\*\*', r'\1', text)
-  text = re.sub(r'__([^_]+)__', r'\1', text)
-
-  # ITALIC
-  text = re.sub(r'\*([^\*]+)\*', r'\1', text)
-  text = re.sub(r'_([^_]+)_', r'\1', text)
-
-  # 
-  text = re.sub(r'~~([^~]+)~~', r'\1', text)
-
-  # ALT TEXT LINKS
-  text = re.sub(r'\[([^\]]+)\]\([^\)]+\)', r'\1', text)
-
-  # IMAGES
-  text = re.sub(r'!\[([^\]]*)\]\([^\)]+\)', r'\1', text)
-
-  # SEPARATORS
-  text = re.sub(r'^[\*\-_]{3,}\s*$', '', text, flags=re.MULTILINE)
-
-  # LISTS
-  text = re.sub(r'^\s*[\*\-\+]\s+', '', text, flags=re.MULTILINE)
-  text = re.sub(r'^\s*\d+\.\s+', '', text, flags=re.MULTILINE)
-
-  # BLOCKQUOTES
-  text = re.sub(r'^>\s+', '', text, flags=re.MULTILINE)
-
-  # CALLOUTS
-  text = re.sub(r'\[![\w]+\]', '', text)
-
-  # EMBEDS
-  text = re.sub(r'!\[\[.*?\]\]', '', text)
-
-  # URLS
-  text = re.sub(r'https?://[^\s]+', '', text)
-  text = re.sub(r'www\.[^\s]+', '', text)
-
-  return text
-# ====================================
-
-
 # ::::: MICROSOFT EDGE TTS :::::
 def text_to_voice(text: str, name_file: str) -> None:
   output_audio_file = ATTACHMENTS_DIR.joinpath(f"{name_file}.mp3")
@@ -541,19 +489,19 @@ def text_to_voice(text: str, name_file: str) -> None:
 
 
 # ::::: BUILD SUBLIST RESOURCES :::::
-def build_sublist_resources():
+def build_sublist_resources(pdf: str):
   pdf_name = pdf.split("/")[-1]
-  format_name = pdf_name.replace("-", " ") if not pdf_name[0].isdigit else pdf_name
+  format_name = re.sub(r"\-|\_", " ", pdf_name) if not pdf_name[0].isdigit else pdf_name
   return f"\t - [{format_name}]({pdf})\n"
 # ====================================
 
 
 # ::::: GROUP ARTICLE RESOURCES :::::
-def gather_pdfs(text : str) -> str:
+def get_article_resources(text : str) -> str:
   pdf_regex = r"https?://(?:www\.)?[^\s/$.?#].[^\s]*\.pdf(?:\?[^\s]*)?(?:#[^\s]*)?"
   valid_pdfs = re.findall(pdf_regex, text, re.MULTILINE)
 
-  if not valid_pdfs:
+  if valid_pdfs:
     pdf_sublist = [build_sublist_resources(pdf) for pdf in valid_pdfs]
     header = f"- Papers cited in this article:\n"
     return header + "".join(pdf_sublist)
@@ -605,7 +553,7 @@ async def main(json_file: Path, progress, task_id) -> None:
   # --- TRANSLATE ---
     if translate_on and detect(md_article) != DEFAULT_LANGUAGE:
       progress.update(task_id, advance=20)
-      progress.update(task_id, description=f"[cyan]Generating[/cyan] audio")
+      progress.update(task_id, description=f"[cyan]Translating[/cyan] article")
 
 
       md_article = await translate(md_article)
@@ -617,7 +565,7 @@ async def main(json_file: Path, progress, task_id) -> None:
       progress.update(task_id, description=f"[cyan]Generating[/cyan] audio")
 
       audio_filename = get_hash(title.encode('utf-8'))
-      plain_text = convert_to_plaintext(md_article)
+      plain_text = convert_to_plain_text(md_article)
 
       await asyncio.to_thread(text_to_voice, plain_text, audio_filename)
 
@@ -634,7 +582,7 @@ async def main(json_file: Path, progress, task_id) -> None:
     progress.update(task_id, advance=5)
     progress.update(task_id, description=f"[cyan]Extracting[/cyan] resources")
 
-    external_resources = gather_resources(md_article)
+    external_resources = get_article_resources(md_article)
     
     # --- BUILD TEMPLATE ---
     progress.update(task_id, advance=5)
@@ -684,3 +632,4 @@ async def start_sync() -> None:
 
 if __name__ == "__main__":
   main_cli()
+  
