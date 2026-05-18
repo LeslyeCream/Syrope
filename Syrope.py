@@ -345,7 +345,7 @@ async def batch_img_download(article_content: str) -> str:
 
 
 # ::::: Satanize INLINE TITLE :::::
-def sstanize_text(title: str) -> str:
+def satanize_text(title: str) -> str:
   pattern = re.compile(r'[^\w\s\-.,()&!;@]')
   clean_title: str = pattern.sub("", title)
   return clean_title
@@ -441,7 +441,7 @@ def format_tags(tags: str) -> str:
 def build_template(creation_date: str, author: str, title: str, num_words: int, read_time: str, note_with_img: str, url: str, tags: list, audio: str, external_resources: str) -> str:
   metadata = {
   "%CREATIONDATE": creation_date,
-  "%AUTHOR": satanize_txt(author) if  author != "[no-author]" else "Unknown",
+  "%AUTHOR": sanatize_txt(author) if  author != "[no-author]" else "Unknown",
   "%WORDS": num_words,
   "%READTIME": f"{read_time} minutes",
   "%ARTICLE": note_with_img,
@@ -590,7 +590,7 @@ async def main(json_file: Path, progress, task_id) -> None:
 
   # --- ARTICLE METADATA ---
     author = readability_article.author()
-    title = sstanize_text(readability_article.title())
+    title = satanize_text(readability_article.title())
     num_words = len(md_article.split(" "))
     read_time = num_words // WPM
 
@@ -609,7 +609,7 @@ async def main(json_file: Path, progress, task_id) -> None:
 
 
       md_article = await translate(md_article)
-      title = sstanize_text(await translate(title))  
+      title = satanize_text(await translate(title))  
 
   # --- EDGE TTS ---
     if voice_on and read_time < READING_THRESHOLD:
