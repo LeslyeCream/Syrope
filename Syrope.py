@@ -241,6 +241,7 @@ def save_single_url(url: str, params: dict) -> None:
   params["url"] = remove_tracking_param(url)
   save_changes_on_file(params)
   show_message("Url saved!")
+  main_tui()
 # ====================================
 
 
@@ -481,7 +482,7 @@ def save_to_file(name_file: str, content: str) -> None:
 # ::::: FORMAT TAGS :::::
 def format_tags(tags: str) -> str:
   if not tags:
-    return ""
+    return None
   else:
     x_tags = tags.split(",")
     return "\n" + "".join(f"  - {i}\n" for i in x_tags)
@@ -490,36 +491,46 @@ def format_tags(tags: str) -> str:
 
 # ::::: BUILD TEMPLATE :::::
 def build_template(*args) -> str:
-
-  creation_date = args[0]
-  author = args[1]
-  num_words = args[2]
-  read_time = args[3]
-  full_article = args[4]
-  url = args[5]
-  tags = args[6]
-  audio = args[7]
-  cited_pdfs = args[8]
-
+  creation_date, author, num_words, read_time, full_article, url, tags, audio, cited_pdfs = args
+  
   metadata = {
     "%CREATIONDATE": creation_date,
-    "%AUTHOR": satanize_text(author) if author != "[no-author]" else "Unknown",
+    "%AUTHOR": author,
     "%WORDS": num_words,
-    "%READTIME": f"{read_time} minutes",
+    "%READTIME": read_time,
     "%ARTICLE": full_article,
     "%URL": url,
-    "%TAGS": format_tags(tags) if tags else "",
-    "%AUDIO": f"![[{audio}.mp3]]" if audio is not None else "",
-    "%RESOURCES": cited_pdfs if cited_pdfs is not None else "",
+    "%TAGS": tags,
+    "%AUDIO": audio,
+    "%RESOURCE": cited_pdfs
   }
+
+   
+  missing_values = (key for key, value in metadata.items() if not value)
+  
 
   with open(TEMPLATE, "r", encoding="utf-8") as f:
     template = f.read()
-    for var, value in metadata.items():
-      if var in template:
-        template = template.replace(str(var), str(value))
+  
+  if missing_values:
+    template = del_properties(template, missing_values)
+  
+  for var, value in filter(lambda item: item[0] not in missing_values, metadata.items()):
+    if var in template:
+      template = template.replace(str(var), str(value))
 
   return template
+# ====================================
+
+
+# ::::: DEL UNUSED PROPERTIES :::::
+def del_properties(text: str, properties: list):
+  props_to_del = "|".join(properties)
+
+  valid_lines = [line for line in text.split("\n") if not re.search(props_to_del, line)]
+  cleaned_txt = '\n'.join(valid_lines)
+  
+  return cleaned_txt
 # ====================================
 
 
@@ -574,6 +585,8 @@ def get_article_resources(text: str) -> str:
 # ====================================
 
 
+
+
 # ::::: MAIN :::::
 async def main(json_file, progress, task_id) -> None:
 
@@ -583,26 +596,28 @@ async def main(json_file, progress, task_id) -> None:
   )
 
   # --- HTML ---
+  raw_html = load_web_site(url)
+  
   progress.update(task_id, advance=5)
   progress.update(task_id, description="[cyan]Downloading[/cyan] website")
-
-  raw_html = load_web_site(url)
 
   if not raw_html:
     show_message(f"Error downloading {url}")
 
   else:
-    progress.update(task_id, advance=5)
-    progress.update(task_id, description="[cyan]Extracting[/cyan] article")
-
     readability_article = readability_mode(raw_html)
     summary_article = readability_article.summary(keep_all_images=True)
 
+    progress.update(task_id, advance=5)
+    progress.update(task_id, description="[cyan]Extracting[/cyan] article")
+
+
     # --- MARKDOWN ---
+    md_article = md(summary_article)
+
     progress.update(task_id, advance=5)
     progress.update(task_id, description="[cyan]Markdowning[/cyan] website")
 
-    md_article = md(summary_article)
 
     # --- ARTICLE METADATA ---
     author = readability_article.author()
@@ -610,72 +625,82 @@ async def main(json_file, progress, task_id) -> None:
     num_words = len(md_article.split(" "))
     read_time = num_words // WPM
 
+
     # --- APPLY REGEX CONTENT RULES ---
     if custom_regex:
+      md_article = content_rules(md_article)
+      
       progress.update(task_id, advance=10)
       progress.update(task_id, description="[cyan]Applying[/cyan] regex rules")
 
-      md_article = content_rules(md_article)
 
     # --- TRANSLATE ---
     if translation and detect(md_article) != DEFAULT_LANGUAGE:
-      progress.update(task_id, advance=20)
-      progress.update(task_id, description="[cyan]Translating[/cyan] article")
-
       md_article = await translate(md_article)
       title = satanize_text(await translate(title))
 
-    # --- EDGE TTS ---
-    if voice and read_time < READING_THRESHOLD:
       progress.update(task_id, advance=20)
-      progress.update(task_id, description="[cyan]Generating[/cyan] audio")
+      progress.update(task_id, description="[cyan]Translating[/cyan] article")
 
-      audio_file = get_hash(title.encode("utf-8"))
+
+    # --- EDGE TTS ---
+    audio_file = None 
+
+    if voice and read_time < READING_THRESHOLD:
+      
+      audio_file = f"![[{get_hash(title.encode("utf-8"))}.mp3]]"
       plain_text = convert_to_plain_text(md_article)
 
       await asyncio.to_thread(text_to_voice, plain_text, audio_file)
 
-    else:
-      audio_file = None
+    progress.update(task_id, advance=20)
+    progress.update(task_id, description="[cyan]Generating[/cyan] audio")
+
 
     # --- IMAGES ---
+    full_article = await batch_img_download(md_article)
+
     progress.update(task_id, advance=20)
     progress.update(task_id, description="[cyan]Downloading[/cyan] images")
 
-    full_article = await batch_img_download(md_article)
 
     # --- GROUP RESOURCES ---
+    cited_pdfs = get_article_resources(md_article)
+    
     progress.update(task_id, advance=5)
     progress.update(task_id, description="[cyan]Extracting[/cyan] resources")
 
-    cited_pdfs = get_article_resources(md_article)
 
     # --- BUILD TEMPLATE ---
-    progress.update(task_id, advance=5)
-    progress.update(task_id, description="[cyan]Building[/cyan] template")
-
     article_params = (
       creation_date,
       author,
       num_words,
-      read_time,
+      f"{read_time} minutes",
       full_article,
       url,
-      tags,
+      format_tags(tags),
       audio_file,
       cited_pdfs,
     )
 
     note_templated = build_template(*article_params)
 
+    progress.update(task_id, advance=5)
+    progress.update(task_id, description="[cyan]Building[/cyan] template")
+
+
     # --- SAVE FILE ---
+    save_to_file(title, note_templated)
+
     progress.update(task_id, advance=5)
     progress.update(task_id, description="[cyan]Saving[/cyan] note")
 
-    save_to_file(title, note_templated)
 
     # --- DEL ARTICLE DOWNLOADED ---
     delete_json(json_file)
+    
+    progress.update(task_id, completed=100)
 # ====================================
 
 
@@ -703,6 +728,8 @@ async def start_sync() -> None:
 
       async with semaphore:
         await main(file_path, progress, task_id)
+        progress.stop_task(task_id)
+        progress.update(task_id, description="[green]✓ Done[/green]")
 
     await asyncio.gather(*(limited_process(f) for f in json_files))
 
@@ -712,3 +739,4 @@ async def start_sync() -> None:
 
 if __name__ == "__main__":
   main_cli()
+  
