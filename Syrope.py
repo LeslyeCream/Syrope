@@ -294,14 +294,12 @@ def get_hash(text: str) -> str:
 
 
 # ::::: DELETE DUPLICATE LINKS (IMG) :::::
-def del_dupli_links(article: str, markdown_img) -> str:
-  processed = set()
-
-  for i in markdown_img:
-    if i in processed:
-      article = re.sub(re.escape(i), "", article, count=1)
-    else:
-      processed.add(i)
+def del_dupli_links(article: str, wiki_urls: list) -> str:
+  for img in wiki_urls:
+    count = article.count(img)
+    if count > 1:
+      article = re.sub(re.escape(img), "", article, count=count - 1)
+  
   return article
 # ====================================
 
@@ -332,40 +330,47 @@ async def check_and_download_img(aiohttp_request, url_img: str) -> str:
 # ====================================
 
 
-# ::::: BATCH DOWNLOAD :::::
-async def batch_img_download(md_article: str) -> str:
-  regex_wiki = r"^[!\[]\S+\)$"
-  only_url_pattern = r"https://[^\s\)\]]+"
-  new_line_pattern = r"(?<=\))(!\[\])(?=\()"
-
-  # --- Find wikilinks ---
-  md_wikilinks: list = re.findall(regex_wiki, md_article, re.MULTILINE)
-
-  # --- Mapping brackets_links ---
-  if len(md_wikilinks) >= 1:
-    urls_img = [
-      only_url_img.group(0)
-      for wiki in md_wikilinks
-      if (only_url_img := re.search(only_url_pattern, wiki))
-    ]
-
-    async with aiohttp.ClientSession() as aiohttp_request:
-      tasks = [check_and_download_img(aiohttp_request, url) for url in urls_img]
-      img_objects: list = await asyncio.gather(*tasks, return_exceptions=True)
-
-    for ext_img, local_img in list(zip(md_wikilinks, img_objects)):
-      if local_img and isinstance(local_img, str): #first try with isinstance instead ==
-        local_img = f"![[{local_img}]]"
-        
-        md_article = re.sub(re.escape(ext_img), local_img, md_article)
-
-    md_article = del_dupli_links(md_article, urls_img) #needed(?)
-    
-    return re.sub(new_line_pattern, r"\n\n\1", md_article)
-
-  else:
-    return md_article
+# ::::: GET WIKILINKS :::::
+def get_wikilinks(md_text: str) -> list:
+  regex_wiki = r"!\[.*?\]\(.*?\)"
+  wikilinks = re.findall(regex_wiki, md_text, re.MULTILINE)
+  return wikilinks
 # ====================================
+
+
+# ::::: GET URL IMGS :::::
+def get_url_imgs(wikilinks: list) -> list:
+  img_regex = r"https://[^\s\)\]]+"
+  
+  if wikilinks:
+    urls_img = [
+    img_link.group(0)
+    for wiki in wikilinks
+    if (img_link := re.search(img_regex, wiki))
+    ]
+    
+    return urls_img
+# ====================================
+ 
+
+# ::::: BATCH DOWNLOAD :::::
+async def batch_img_download(md_article: str, md_wikilinks: list, url_imgs: list) -> str:
+  if md_wikilinks and url_imgs:
+    
+    async with aiohttp.ClientSession() as aiohttp_request:
+      tasks = [check_and_download_img(aiohttp_request, url) for url in url_imgs]
+      img_objects: list = await asyncio.gather(*tasks, return_exceptions=True)
+  
+      for ext_img, local_img in list(zip(md_wikilinks, img_objects)):
+        if local_img and isinstance(local_img, str): #first try with isinstance instead ==
+          local_img = f"![[{local_img}]]"
+          article_w_imgs = re.sub(re.escape(ext_img), local_img, md_article)
+      
+      new_line_pattern = r"(?<=\))(!\[\])(?=\()"
+      return re.sub(new_line_pattern, r"\n\n\1", article_w_imgs)
+  
+  return md_article
+  # ====================================
 
 
 # ::::: SATANIZE INLINE TITLE :::::
@@ -499,7 +504,7 @@ def build_template(*args) -> str:
     "%URL": url,
     "%TAGS": tags,
     "%AUDIO": audio,
-    "%RESOURCE": cited_pdfs
+    "%PDF": cited_pdfs
   }
 
    
@@ -573,12 +578,15 @@ def build_sublist_resources(pdf: str):
 # ::::: GROUP ARTICLE RESOURCES :::::
 def get_article_resources(text: str) -> str:
   pdf_regex = r"https?://(?:www\.)?[^\s/$.?#].[^\s]*\.pdf(?:\?[^\s]*)?(?:#[^\s]*)?"
+  
   valid_pdfs = re.findall(pdf_regex, text, re.MULTILINE)
-
+  
   if valid_pdfs:
     pdf_sublist = [build_sublist_resources(pdf) for pdf in valid_pdfs]
     header = "- Papers cited in this article:" + "\n"
-    return header + "".join(pdf_sublist)
+    stylized_pdfs = header + "".join(pdf_sublist)
+    
+    return stylized_pdfs
 # ====================================
 
 
@@ -670,10 +678,15 @@ async def main(json_file, progress, task_id) -> None:
     # --- IMAGES ---
     progress.update(task_id, advance=20)
     progress.update(task_id, description="[cyan]Downloading[/cyan] images")
-
-    full_article = await batch_img_download(md_article)
-
-
+    
+    wiki_urls = get_wikilinks(md_article)
+    url_imgs = get_url_imgs(wiki_urls)
+    
+    article_dedup = del_dupli_links(md_article, wiki_urls)
+    
+    full_article = await batch_img_download(article_dedup, wiki_urls, url_imgs)
+    
+    
     # --- GROUP RESOURCES ---
     progress.update(task_id, advance=5)
     progress.update(task_id, description="[cyan]Extracting[/cyan] resources")
@@ -708,7 +721,7 @@ async def main(json_file, progress, task_id) -> None:
 
 
     # --- DEL ARTICLE DOWNLOADED ---
-    delete_json(json_file)
+    #delete_json(json_file)
     
     progress.update(task_id, completed=100)
 # ====================================
