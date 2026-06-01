@@ -260,16 +260,15 @@ def save_changes_on_file(params: dict) -> None:
 # ::::: GET WEB PAGE :::::
 async def load_web_site(url: str, httpx_c) -> str:
   try:
+    response = await httpx_c.get(url, follow_redirects=True)
     
-    response = await httpx_c.get(url)
     if response.status_code == 200:
-      data = response.encoding or "utf-8"
-      return response.content.decode(data, errors="replace")
-    else:
-      return None
+      return response.text
   
-  except httpx.RequestError:
-    return None
+    raise Exception(f"loading website {response.status_code}")
+  
+  except Exception as e:
+    raise Exception(e)
 # ====================================
 
 
@@ -283,14 +282,14 @@ def get_hash(text: bytes) -> str:
 # ::::: DOWNLOAD AND SAVE IMAGE :::::
 async def download_files(url: str, httpx_c) -> str:
   try:
-    response = await httpx_c.get(url)
+    response = await httpx_c.get(url, follow_redirects=True)
     content_type = response.headers.get('Content-Type', '')
     if response.status_code == 200:
       file_obj =  response.content
 
       # --- Get info image ---
       file_extension = "." + content_type.split(";")[0].split("/")[1]
-      md5_filename = get_hash(file_obj) + file_extension
+      md5_filename =get_hash(file_obj) + file_extension
       dst_path = ATTACHMENTS_DIR.joinpath(md5_filename)
 
       # --- Save image ---
@@ -331,42 +330,41 @@ def get_wikilinks(md_article: str):
 # ====================================
 
 # ::::: BATCH DOWNLOAD :::::
-async def handle_images(md_article: str,  httpx_c) -> str:
-  
-  wikilinks = get_wikilinks(md_article)
-
-  if not wikilinks:
-    return md_article
-
+async def handle_images(md_article: str, wikilinks: tuple,  httpx_c) -> str:
   brackets, urls = wikilinks
-  type_tasks = [content_type(url, httpx_c) for url in urls]
-  file_type = await asyncio.gather(*type_tasks, return_exceptions=True)
+  
+  try:
+    type_tasks = [content_type(url, httpx_c) for url in urls]
+    file_type = await asyncio.gather(*type_tasks, return_exceptions=True)
+    
+    results = list(zip(brackets, urls, file_type))
+  
+    valid_urls_img = [(bracket, url) for bracket, url, ext in results if ext and "image" in ext]
+    
+    if not valid_urls_img:
+      return md_article
+  
+    down_tasks = [download_files(url, httpx_c) for bracket, url in valid_urls_img]
+    md5_obj = await asyncio.gather(*down_tasks, return_exceptions=True)
+  
+    brackets, urls = zip(*valid_urls_img)
+    mapping = list(zip(brackets, urls, md5_obj))
 
-  results = list(zip(brackets, urls, file_type))
-
-  valid_urls_img = [(bracket, url) for bracket, url, ext in results if ext and "image" in ext]
-
-  if not valid_urls_img:
+    for ext_img, _, local_img in mapping:
+        
+      count = md_article.count(ext_img)
+        
+      if count > 1:
+        md_article = re.sub(re.escape(ext_img), "", md_article, count=count - 1)
+      
+      local_img = f"![[{local_img}]]"
+      
+      md_article = re.sub(re.escape(ext_img), local_img, md_article)
+      
     return md_article
-
-  down_tasks = [download_files(url, httpx_c) for bracket, url in valid_urls_img]
-  md5_obj = await asyncio.gather(*down_tasks, return_exceptions=True)
-
-  brackets, urls = zip(*valid_urls_img)
-  mapping = list(zip(brackets, urls, md5_obj))
-
-  for ext_img, _, local_img in mapping:
-      
-    count = md_article.count(ext_img)
-      
-    if count > 1:
-      md_article = re.sub(re.escape(ext_img), "", md_article, count=count - 1)
-    
-    local_img = f"![[{local_img}]]"
-    
-    md_article = re.sub(re.escape(ext_img), local_img, md_article)
-    
-  return md_article
+  
+  except Exception as e:
+    show_message(e)
 # ====================================
 
 
@@ -654,60 +652,57 @@ async def main(json_data: dict, json_file: str, progress_bar, task_id, httpx_c) 
   translation = json_data["translate"]
   
   # --- LOAD WEB SITE AND GET HTML ---
+  pure_html = await load_web_site(url, httpx_c)
   progress_bar.update(task_id, advance=10, description="[cyan]Downloading[/cyan] website")
 
-  pure_html = await load_web_site(url, httpx_c)
-  
-  if not pure_html:
-    return None
-    
   # --- MARKDOWN ---
   progress_bar.update(task_id, advance=10, description="[cyan]Extracting[/cyan] article")
-
+  
   md_article, author, title, num_words, read_time = await asyncio.to_thread(get_markdown, pure_html)
- 
+    
   # --- APPLY REGEX CONTENT RULES ---
   if custom_regex and RULES_REGEX:
     progress_bar.update(task_id, advance=10, description="[cyan]Applying[/cyan] regex rules")
-      
+        
     md_article = apply_custom_regex(md_article)
     
   # --- TRANSLATE ---
   progress_bar.update(task_id, advance=10, description="[cyan]Translating[/cyan]")
-    
+      
   article_lang = langid.classify(title)[0].upper()
   if translation and article_lang != DEFAULT_LANGUAGE:
     md_article = await handle_translate(md_article, httpx_c)
     title = sanitize_text(await handle_translate(title, httpx_c))
-  
     
   # --- EDGE TTS ---
   audio_file = None
-  
+    
   if voice and read_time < READING_THRESHOLD:
     progress_bar.update(task_id, advance=10, description="[cyan]Generating[/cyan] audio")
-      
+        
     audio_name = get_hash(title.encode("utf-8"))
     audio_file = f"![[{audio_name}.mp3]]"
     plain_text = convert_to_plain_text(md_article)
-  
+    
     await asyncio.to_thread(text_to_voice, plain_text, audio_name)
-      
+    
   # --- IMAGES ---
-  
+    
   progress_bar.update(task_id, advance=10, description="[cyan]Downloading[/cyan] images")
     
-  md_article = await handle_images(md_article, httpx_c)
-     
+  wikilinks = get_wikilinks(md_article)
+
+  md_article = await handle_images(md_article, wikilinks, httpx_c)
+
   # --- PDFS FILES ---
 
   progress_bar.update(task_id, advance=10, description="[cyan]Extracting[/cyan] pdfs")
-    
+      
   pdf_files = await get_pdfs(md_article, httpx_c)
-  
+    
   # --- BUILD TEMPLATE ---
   progress_bar.update(task_id, advance=10, description="[cyan]Building[/cyan] template")
-
+  
   article_params = (
     creation_date,
     author,
@@ -719,18 +714,18 @@ async def main(json_data: dict, json_file: str, progress_bar, task_id, httpx_c) 
     audio_file,
     pdf_files,
   )
-
+  
   note_templated = build_template(*article_params)
-
+    
   # --- SAVE FILE ---
   progress_bar.update(task_id, advance=10, description="[cyan]Saving[/cyan] file")
-
-  save_to_file(title, note_templated)
-
-
+  
+  save_to_file(sanitize_text(title), note_templated)
+  
+  
   # --- DEL ARTICLE DOWNLOADED ---
   delete_json(json_file)
-    
+      
   progress_bar.update(task_id, completed=100)
 # ====================================
 
@@ -738,9 +733,13 @@ async def main(json_data: dict, json_file: str, progress_bar, task_id, httpx_c) 
 # ::::: RUN SYNC :::::
 async def run_sync(json_data: dict, json_file, semaphore, progress_bar, httpx_c):
   async with semaphore:
-    task_id = progress_bar.add_task("Procesando...", total=100, filename=json_data["url"])
-    await main(json_data, json_file, progress_bar, task_id, httpx_c)
-    progress_bar.update(task_id, completed=100, description="[green]✓ Done[/green]")
+    try:
+      task_id = progress_bar.add_task("Procesando...", total=100, filename=json_data["url"])
+      await main(json_data, json_file, progress_bar, task_id, httpx_c)
+      progress_bar.update(task_id, completed=100, description="[green]✓ Done[/green]")
+    except Exception as e: 
+      progress_bar.update(task_id, description=f"[red]ERROR: [/red] {e}")
+
 # ====================================
 
 
@@ -757,10 +756,13 @@ async def handle_sync() -> None:
   custom_bar = r"{task.percentage}% - {task.description} ([yellow]{task.fields[filename]}[/yellow])"
   
   with Progress(SpinnerColumn(), TextColumn(custom_bar), refresh_per_second=5) as progress_bar:
-    async with httpx.AsyncClient() as httpx_c:
+    async with httpx.AsyncClient(headers={"User-Agent": USERAGENT}) as httpx_c:
       await asyncio.gather(*(run_sync(json_data[0], json_data[1], semaphore, progress_bar, httpx_c) for json_data in articles_json), return_exceptions=True)
 # ====================================
 
 
 if __name__ == "__main__":
   main_cli()
+  
+
+
