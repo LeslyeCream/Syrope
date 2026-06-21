@@ -1,0 +1,28 @@
+PATHS:
+  ARTICLES_DIR: '/storage/emulated/0/Documents/Obsidian/Read Later'
+  ATTACHMENTS_DIR: '/storage/emulated/0/Documents/Obsidian/Read Later/Attachments'
+  
+OTHERS:
+  TRANSLATE_LANGUAGES: 
+   - es
+   - ita
+  USERAGENT: 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Mobile Safari/537.36'
+  DEL_SYNCED_ARTICLES: False
+  DATETIME_FORMAT: '%Y-%m-%d %H:%M'
+  DEFAULT_LANGUAGE: 'EN'
+  REQUEST_TIMEOUT: 30
+  READING_THRESHOLD: 5
+  WPM: 275
+  TTS_VOICE: 'VOICE_HERE'
+
+PARAM_DEFAULTS:
+  labels: None
+  translate: true
+  voice: true
+  regex: true
+
+API:
+  API_KEY : 'KEY_HERE'
+  CLOUDFARE_URL: 'URL_HERE'
+
+REGEX:
