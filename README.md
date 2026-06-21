@@ -34,7 +34,7 @@ Syrope has two modes of use:
 Just run the script:
 
 ```bash
-python syrope.py
+python Syrope.py
 ```
 
 You'll see options like:
@@ -51,19 +51,19 @@ Use command-line options for more control:
 **Add a single URL**
 
 ```bash
-python syrope.py "https://example.com/article" --labels "tag1,tag2" --voice --regex --translate
+python Syrope.py "https://example.com/article" --labels "tag1,tag2" --voice --regex --translate
 ```
 
 **Add multiple URLs from a file**
 
 ```bash
-python syrope.py -i my_urls.txt --voice --translate --labels "Science, Study, News"
+python Syrope.py -i my_urls.txt --voice --translate --labels "Science, Study, News"
 ```
 
 # Start syncing
 
 ```python
-python syrope.py --sync
+python Syrope.py --sync
 ```
 
 *or simply by using ```--sync``` along with any other command*
@@ -126,7 +126,7 @@ Tags: %TAGS
 ## Command Line Options
 
 ```bash
-python syrope.py [URL] [OPTIONS]
+python Syrope.py [URL] [OPTIONS]
 
 Options:
   -l, --labels LABELS       Add tags to the article (comma-separated)
@@ -182,7 +182,7 @@ REGEX:
 
 ```
 Syrope/
-├── syrope.py             # Main script
+├── Syrope.py             # Main script
 ├── Settings.yaml         # Configuration file
 ├── Template              # File used as a reference for structuring web articles
 ├── Offline               # JSON files (articles) pending synchronization
