@@ -121,14 +121,6 @@ Tags: %TAGS
 > %URL
 ```
 
-### Basic Usage
-
-**Step 1: Add article and start sync**
-
-```bash
-python syrope.py "https://example.com/cool-article" --voice --translate --labels "AI,Technology" -s
-```
-
 ---
 
 ## Command Line Options
