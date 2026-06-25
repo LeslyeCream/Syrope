@@ -712,7 +712,7 @@ async def main(json_data: dict, json_file: str, progress_bar, task_id, httpx_c) 
 async def run_sync(json_data: dict, json_file, semaphore, progress_bar, httpx_c):
   async with semaphore:
     try:
-      task_id = progress_bar.add_task("Procesando...", total=100, filename=json_data["url"])
+      task_id = progress_bar.add_task("In progress...", total=100, filename=json_data["url"])
       await main(json_data, json_file, progress_bar, task_id, httpx_c)
       progress_bar.update(task_id, completed=100, description="[green]✓ Done[/green]")
     except Exception as e: 
