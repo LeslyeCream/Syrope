@@ -5,7 +5,7 @@ httpx==0.28.1
 langdetect==1.0.9
 langid==1.1.6
 markdownify==1.2.2
-plain_text_markdown_extention==1.0.0
+-e git+https://github.com/kostyachum/python-markdown-plain-text.git#egg=plain-text-markdown-extention
 pydefuddle==0.1.0
 PyYAML==6.0.3
 questionary==2.1.1
