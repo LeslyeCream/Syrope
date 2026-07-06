@@ -1,4 +1,5 @@
 from urllib.parse import quote, urlparse
+from collections.abc import Iterator
 from datetime import datetime as dt
 from pathlib import Path
 import asyncio
@@ -10,10 +11,10 @@ import re
 import yaml
 import click
 import httpx
-import langid
 import edge_tts
 import validators
 import questionary
+import py3langid as langid
 from rich.table import Table
 from pydefuddle import defuddle
 from readability import Document
@@ -35,6 +36,7 @@ from markdown_plain_text.extention import convert_to_plain_text
 # Replace build_template to kwargs(?())
 # ✔️ Add detailed information during sync
 # ✔️ Only create audio if the article length is < n
+# Using a class in main
 # ====================================
 
 
@@ -90,23 +92,24 @@ langid.set_languages(TRANSLATE_LANGUAGES)
 
 # :::::::::: TUI - MAIN ::::::::::
 def main_tui() -> None:
-  action = questionary.select(
-    "What do you want to do?",
-    choices=["1. Sync articles", "2. View saved articles", "3. Add URL", "4. Exit"],
-  ).ask()
-
-  match action:
-    case "1. Sync articles":
-      asyncio.run(handle_sync())
-      main_tui()
-    case "2. View saved articles":
-      view_saved_articles()
-      main_tui()
-    case "3. Add URL":
-      menu_add_url()
-      main_tui()
-    case "4. Exit":
-      sys.exit()
+  while True:
+    action = questionary.select(
+      "What do you want to do?",
+      choices=["1. Sync articles", "2. View saved articles", "3. Add URL", "4. Exit"],
+    ).ask()
+  
+    match action:
+      case "1. Sync articles":
+        asyncio.run(handle_sync())
+      
+      case "2. View saved articles":
+        view_saved_articles()
+      
+      case "3. Add URL":
+        menu_add_url()
+      
+      case "4. Exit":
+        break
 # ====================================
 
 
@@ -128,8 +131,8 @@ def menu_add_url() -> None:
 
 
 # :::::::::: JSON DATA ::::::::::
-def get_json_data(json_file: json) -> str:
-  with open(json_file, "r", encoding="utf-8") as f:
+def get_json_data(json_path: Path) -> str:
+  with open(json_path, "r", encoding="utf-8") as f:
     json_content = json.load(f)
     return json_content
 
@@ -169,9 +172,9 @@ def view_saved_articles() -> None:
 @click.argument("url", required=False)
 @click.option("-l", "--labels", type=str, help="Add tags to the article")
 @click.option("-t", "--translate", is_flag=True, help="Translate article")
-@click.option("-v", "--voice", is_flag=True, help="Listen to article")
-@click.option("-r", "--regex", is_flag=True, help="Apply custom regular expressions")
-@click.option("-i", "--input-file", type=str, help="Save URLs from an external file")
+@click.option("-v", "--voice", is_flag=True, help="Create an audio version of the article")
+@click.option("-r", "--regex", is_flag=True, help="Apply custom regex")
+@click.option("-i", "--input-file", type=str, help="Save urls from an external file")
 @click.option("-s", "--sync", is_flag=True, help="Start sync")
 def main_cli(**kwargs) -> None:
   params = kwargs
@@ -182,8 +185,8 @@ def main_cli(**kwargs) -> None:
   cli_set = params.get("input_file"), params.get("url"), params.get("sync")
   if not any(cli_set):
     main_tui()
-
-
+   
+   # --- Multiples urls ---
   elif input_file:
     save_multiples_url(input_file, params)
 
@@ -259,7 +262,7 @@ def save_changes_on_file(params: dict) -> None:
 
 
 # :::::::::: GET WEB PAGE ::::::::::
-async def load_web_site(url: str, httpx_c) -> str:
+async def load_web_site(url: str, httpx_c: httpx.Client) -> str:
   try:
     response = await httpx_c.get(url, follow_redirects=True)
     if response.status_code == 200:
@@ -280,7 +283,7 @@ def get_hash(text: bytes) -> str:
 
 
 # :::::::::: DOWNLOAD AND SAVE IMAGE ::::::::::
-async def download_files(url: str, httpx_c) -> str:
+async def download_files(url: str, httpx_c: httpx.Client) -> str:
   try:
     response = await httpx_c.get(url, follow_redirects=True)
     content_type = response.headers.get('Content-Type', '')
@@ -307,7 +310,7 @@ async def download_files(url: str, httpx_c) -> str:
 
 
 # :::::::::: CONTENT TYPE ::::::::::
-async def content_type(url: str, httpx_c) -> str | None:
+async def content_type(url: str, httpx_c: httpx.Client) -> str | None:
   try:
     response = await httpx_c.head(url, follow_redirects=True)
     return response.headers.get("content-type")
@@ -331,7 +334,7 @@ def get_wikilinks(md_article: str):
 
 
 # :::::::::: BATCH DOWNLOAD ::::::::::
-async def handle_images(md_article: str, wikilinks: tuple,  httpx_c) -> str:
+async def handle_images(md_article: str, wikilinks: tuple,  httpx_c: httpx.Client) -> str:
   brackets, urls = wikilinks
 
   try:
@@ -372,14 +375,15 @@ async def handle_images(md_article: str, wikilinks: tuple,  httpx_c) -> str:
 # :::::::::: SANITIZE INLINE TITLE ::::::::::
 def sanitize_text(title: str) -> str:
   pattern = re.compile(r'[*"\\/<>:|?¿]')
+
   clean_title: str = pattern.sub("", title)
   
   return clean_title
 # ====================================
 
 
-# :::::::::: CLOUDFLARE AI TRANSLATE ::::::::::
-async def cloudfare_translate(txt_translate: str, httpx_c) -> str:
+# :::::::::: CLOUDFLARE TRANSLATE ::::::::::
+async def cloudfare_translate(txt_translate: str, httpx_c: httpx.Client) -> str:
   prompt = f"""Only the answer. Translate "{txt_translate}" to {DEFAULT_LANGUAGE} language."""
   headers: dict = {
     "Authorization": f"Bearer {API_KEY}",
@@ -406,11 +410,10 @@ async def cloudfare_translate(txt_translate: str, httpx_c) -> str:
 
 
 # :::::::::: TRANSLATE ::::::::::
-async def handle_translate(md_article, httpx_c) -> str:
+async def handle_translate(md_article: str, httpx_c: httpx.Client) -> str:
   md_styles_pattern = r"^[!\|\[$-]"
 
   # --- Split in paragraphs ---
-
   org_chunks = [
     chunk
     for chunk in md_article.splitlines()
@@ -421,7 +424,7 @@ async def handle_translate(md_article, httpx_c) -> str:
   # --- Limit tasks ---
   semaphore = asyncio.Semaphore(4)
 
-  async def rate_limit(chunk):
+  async def rate_limit(chunk: str):
     async with semaphore:
       return await cloudfare_translate(chunk, httpx_c) 
 
@@ -444,6 +447,7 @@ async def handle_translate(md_article, httpx_c) -> str:
 def apply_custom_regex(content: str) -> str:
   for rule in RULES_REGEX:
     content = re.sub(rule["Pattern"], rule["Replacement"], content, flags=re.MULTILINE | re.DOTALL)
+  return content
 # ====================================
 
 
@@ -498,7 +502,7 @@ def build_template(*args) -> str:
 
 
 # :::::::::: DEL UNUSED PROPERTIES ::::::::::
-def del_properties(text: str, properties: iter):
+def del_properties(text: str, properties: Iterator[str]):
   props_to_del = "|".join(properties)
 
   valid_lines = [line for line in text.split("\n") if not re.search(props_to_del, line)]
@@ -509,13 +513,13 @@ def del_properties(text: str, properties: iter):
 
 
 # :::::::::: DELETE / MOVE JSON FINISHED ::::::::::
-def delete_json(json_file: Path) -> None:
-  done_path = ARTICLES_SYNCED_DIR.joinpath(json_file.name)
+def delete_json(json_path: Path) -> None:
+  done_path = ARTICLES_SYNCED_DIR.joinpath(json_path.name)
 
   if DEL_SYNCED_ARTICLES:
-    json_file.unlink(missing_ok=True)
+    json_path.unlink(missing_ok=True)
   else:
-    json_file.rename(done_path)
+    json_path.rename(done_path)
 # ====================================
 
 
@@ -537,7 +541,7 @@ def text_to_voice(text: str, name_file: str) -> None:
 
 
 # :::::::::: GET PDFS ::::::::::
-async def get_pdfs(md_article: str, httpx_c) -> str:
+async def get_pdfs(md_article: str, httpx_c: httpx.Client) -> str:
   try:
     # --- Find all urls ---
     all_urls = re.findall(URL_REGEX, md_article, re.MULTILINE)
@@ -553,7 +557,7 @@ async def get_pdfs(md_article: str, httpx_c) -> str:
     if result and not isinstance(result, Exception)
     for data, url in [result]
     if data and data.startswith(b"%PDF")
-]
+    ]
 
     if not valid_pdf_urls:
       return None
@@ -573,12 +577,12 @@ async def get_pdfs(md_article: str, httpx_c) -> str:
               
     return stylized_sublist
   except Exception as e:
-    console.print(f"pdf {e}")
+    show_message(f"pdf {e}")
 # ====================================
 
 
 # :::::::::: GET FILE TYPE ::::::::::
-async def get_file_bytes(url: str, httpx_c) -> tuple | None:
+async def get_file_bytes(url: str, httpx_c: httpx.Client) -> tuple | None:
   try:
     response = await httpx_c.get(url, headers={"Range": "bytes=0-32"}, follow_redirects=True)
     if not response.status_code == 206:
@@ -587,9 +591,8 @@ async def get_file_bytes(url: str, httpx_c) -> tuple | None:
     return data, url
   
   except Exception as e:
-    console.print(f" get file {e}")
+    show_message(f" get file {e}")
 # ====================================
-
 
 
 # :::::::::: MARKDOWN AND METADATA ::::::::::
@@ -619,7 +622,7 @@ def get_markdown(pure_html: str) -> tuple:
 # ====================================
 
 # :::::::::: MAIN ::::::::::
-async def main(json_data: dict, json_file: str, progress_bar, task_id, httpx_c) -> None:
+async def main(json_data: dict, json_file: str, progress_bar, task_id, httpx_c: httpx.Client) -> None:
 
   # --- JSON SETTINGS ---
   creation_date = json_data["creation_date"]
@@ -638,17 +641,16 @@ async def main(json_data: dict, json_file: str, progress_bar, task_id, httpx_c) 
   
   md_article, author, title, num_words, read_time = await asyncio.to_thread(get_markdown, pure_html)
 
-  # --- APPLY REGEX CONTENT RULES ---
+  # --- APPLY CUSTOM REGEX ---
   if custom_regex and RULES_REGEX:
     progress_bar.update(task_id, advance=10, description="[cyan]Applying[/cyan] regex rules")
 
     md_article = apply_custom_regex(md_article)
 
   # --- TRANSLATE ---
-  progress_bar.update(task_id, advance=10, description="[cyan]Translating[/cyan]")
-  
   article_lang = langid.classify(title)[0].upper()
   if translation and article_lang != DEFAULT_LANGUAGE:
+    progress_bar.update(task_id, advance=10, description="[cyan]Translating[/cyan]")
     md_article = await handle_translate(md_article, httpx_c)
     title = sanitize_text(await handle_translate(title, httpx_c))
 
@@ -692,28 +694,233 @@ async def main(json_data: dict, json_file: str, progress_bar, task_id, httpx_c) 
     audio_file,
     pdf_files,
   )
-  
+
   note_templated = build_template(*article_params)
 
   # --- SAVE FILE ---
   progress_bar.update(task_id, advance=10, description="[cyan]Saving[/cyan] file")
-  
+
   save_to_file(sanitize_text(title), note_templated)
- 
+
   # --- DEL ARTICLE DOWNLOADED ---
   delete_json(json_file)
-  
+
   progress_bar.update(task_id, completed=100)
 # ====================================
 
 
+# :::::::::: MAIN CLASS (First attempt) ::::::::::
+class ArticleBuilder:
+  def __init__(self, json_data: dict, json_file: Path, httpx_c: httpx.Client, progress_bar, task_id):
+    
+    # --- Metadata ---
+    self.creation_date = json_data["creation_date"]
+    self.url = json_data["url"]
+    self.voice = json_data["voice"]
+    self.tags = json_data["labels"]
+    self.custom_regex = json_data["regex"]
+    self.translation = json_data["translate"]
+
+    # --- Class args(?) ---
+    self.json_file = json_file
+    self.httpx_c = httpx_c
+    self.progress_bar = progress_bar
+    self.task_id = task_id
+
+    # --- Instance variables(?) ---
+    self.md_article = None
+    self.author = None
+    self.title = None
+    self.num_words = None
+    self.read_time = None
+    self.audio_file = None
+    self.pdf_files = None
+
+  # --- Progress update ---
+  def _progress(self, desc: str, advance: int = 10) -> None:
+    self.progress_bar.update(self.task_id, advance=advance, description=f"[cyan]{desc}[/cyan]")
+
+
+  # --- Run ---
+  async def run(self) -> None:
+    
+    # --- Get website --- 
+    pure_html = await self.load_web_site()
+    self._progress("Downloading website...")
+
+    # --- Markdown ---
+    self._progress("Extracting article...")
+    self.md_article, self.author, self.title, self.num_words, self.read_time = \
+      await asyncio.to_thread(get_markdown, pure_html)
+    
+    # --- Custom Regex --- 
+    if self.custom_regex and RULES_REGEX:
+      self._progress("Applying regex rules...")
+      self.md_article = apply_custom_regex(self.md_article)
+
+    # --- Translate ---
+    article_lang = langid.classify(self.title)[0].upper()
+    if self.translation and article_lang != DEFAULT_LANGUAGE:
+      self._progress("Translating...")
+      self.md_article = await self.handle_translate(self.md_article)
+      self.title = sanitize_text(await self.handle_translate(self.title))
+    
+    # --- Audio note --- 
+    if self.voice and self.read_time < READING_THRESHOLD:
+      self._progress("Generating audio")
+      audio_name = get_hash(self.title.encode("utf-8"))
+      self.audio_file = f"![[{audio_name}.mp3]]"
+      plain_text = convert_to_plain_text(self.md_article)
+      await asyncio.to_thread(text_to_voice, plain_text, audio_name)
+
+    # --- Images ---
+    self._progress("Downloading images")
+    wikilinks = get_wikilinks(self.md_article)
+    self.md_article = await self.handle_images(wikilinks)
+    
+    # --- PDFS ---
+    self._progress("Extracting pdfs")
+    self.pdf_files = await self.get_pdfs()
+
+    # --- Template ---
+    self._progress("Building template")
+    note_templated = self.build_note()
+
+    # --- Saving and deleting ---
+    self._progress("Saving file")
+    save_to_file(sanitize_text(self.title), note_templated)
+    delete_json(self.json_file)
+    self.progress_bar.update(self.task_id, completed=100)
+
+  async def load_web_site(self) -> str:
+    response = await self.httpx_c.get(self.url, follow_redirects=True)
+    if response.status_code == 200:
+      return response.text
+    raise Exception(f"loading website {response.status_code}")
+
+  async def handle_translate(self, text: str) -> str:
+    md_styles_pattern = r"^[!\|\[$-]"
   
-# :::::::::: START SYNC ::::::::::
-async def run_sync(json_data: dict, json_file, semaphore, progress_bar, httpx_c):
+    # --- Split in paragraphs ---
+    org_chunks = [
+      chunk
+      for chunk in text.splitlines()
+      if chunk and not re.match(md_styles_pattern, chunk)
+    ]
+
+    # --- Limit tasks ---
+    semaphore = asyncio.Semaphore(4)
+  
+    async def rate_limit(chunk: str):
+      async with semaphore:
+        return await cloudfare_translate(chunk, self.httpx_c) 
+  
+    trans_tasks = [rate_limit(org_chunk) for org_chunk in org_chunks]
+  
+    trans_chunks: list = await asyncio.gather(*trans_tasks, return_exceptions=True)
+  
+    translated_map = dict(zip(org_chunks, trans_chunks))
+    
+    translated_article = text
+    
+    for original_chunk, translated_chunk in translated_map.items():
+      translated_article = re.sub(re.escape(original_chunk), translated_chunk, translated_article, count=1)
+  
+    return translated_article
+  
+  # --- DOWNLOAD IMAGES ---
+  async def handle_images(self, wikilinks: tuple) -> str:
+    brackets, urls = wikilinks
+
+    try:
+      type_tasks = [content_type(url, self.httpx_c) for url in urls]
+      file_type = await asyncio.gather(*type_tasks, return_exceptions=True)
+  
+      results = list(zip(brackets, urls, file_type))
+  
+      valid_urls_img = [(bracket, url) for bracket, url, ext in results if ext and "image" in ext]
+  
+      if not valid_urls_img:
+        return self.md_article
+  
+      down_tasks = [download_files(url, self.httpx_c) for bracket, url in valid_urls_img]
+      md5_obj = await asyncio.gather(*down_tasks, return_exceptions=True)
+  
+      brackets, urls = zip(*valid_urls_img)
+      mapping = list(zip(brackets, urls, md5_obj))
+  
+      for ext_img, _, local_img in mapping:
+      
+        count = self.md_article.count(ext_img)
+      
+        if count > 1:
+          self.md_article = re.sub(re.escape(ext_img), "", self.md_article, count=count - 1)
+    
+        local_img = f"![[{local_img}]]"
+    
+        self.md_article = re.sub(re.escape(ext_img), local_img, self.md_article)
+    
+      return self.md_article
+    
+    except Exception as e:
+      show_message(e)
+
+  async def get_pdfs(self) -> str | None:
+    try:
+      # --- Find all urls ---
+      all_urls = re.findall(URL_REGEX, self.md_article, re.MULTILINE)
+  
+      filetype_results = await asyncio.gather(
+      *[get_file_bytes(url, self.httpx_c) for url in all_urls],
+      return_exceptions=True
+      )
+  
+      valid_pdf_urls = [
+      url
+      for result in filetype_results
+      if result and not isinstance(result, Exception)
+      for data, url in [result]
+      if data and data.startswith(b"%PDF")
+      ]
+  
+      if not valid_pdf_urls:
+        return None
+  
+      download_tasks = [download_files(url, self.httpx_c) for url in valid_pdf_urls]
+      pdfs_md5_names = await asyncio.gather(*download_tasks, return_exceptions=True)
+  
+      pdf_sublist = []
+          
+      for ext_pdf, local_pdf in zip(valid_pdf_urls, pdfs_md5_names):
+        pdf_filename = ext_pdf.split("/")[-1]
+        pdf_name_formated = re.sub(r"-|_|%\d{2}|(?<=\.pdf).+$", " ", pdf_filename).capitalize()
+        pdf_sublist.append(f"\t - [{pdf_name_formated}]({local_pdf})\n")
+            
+      header = "- Papers cited in this article:" + "\n"
+      stylized_sublist = header + "".join(pdf_sublist)
+                
+      return stylized_sublist
+    except Exception as e:
+      show_message(f"pdf {e}")
+      
+    
+  def build_note(self) -> str:
+    article_params = (
+      self.creation_date, self.author, self.num_words, self.read_time,
+      self.md_article, self.url, format_tags(self.tags),
+      self.audio_file, self.pdf_files,
+    )
+    return build_template(*article_params)
+# ====================================
+
+
+# :::::::::: RUN SYNC ::::::::::
+async def run_sync(json_data: dict, json_file: str, semaphore, progress_bar, httpx_c: httpx.Client):
   async with semaphore:
     try:
-      task_id = progress_bar.add_task("In progress...", total=100, filename=json_data["url"])
-      await main(json_data, json_file, progress_bar, task_id, httpx_c)
+      task_id = progress_bar.add_task("Procesando...", total=100, filename=json_data["url"])
+      processor = ArticleBuilder(json_data, json_file, httpx_c, progress_bar, task_id)
+      await processor.run()
       progress_bar.update(task_id, completed=100, description="[green]✓ Done[/green]")
     except Exception as e: 
       progress_bar.update(task_id, description=f"[red]ERROR: [/red] {e}")
