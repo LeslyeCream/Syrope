@@ -20,6 +20,7 @@ PARAM_DEFAULTS:
   translate: true
   voice: true
   regex: true
+  pdfs: true
 
 API:
   API_KEY : 'KEY_HERE'
