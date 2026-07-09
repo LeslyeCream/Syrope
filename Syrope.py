@@ -289,7 +289,7 @@ async def download_files(url: str, httpx_c: httpx.Client) -> str:
     content_type = response.headers.get('Content-Type', '')
     
     if response.status_code != 200:
-      return f"![error downloading]({url})" # for avoid local images emptys
+      return f"![error downloading]({url})"
       
     file_obj =  response.content
 
