@@ -135,7 +135,6 @@ def get_json_data(json_path: Path) -> str:
   with open(json_path, "r", encoding="utf-8") as f:
     json_content = json.load(f)
     return json_content
-
 # ====================================
 
 
@@ -175,6 +174,7 @@ def view_saved_articles() -> None:
 @click.option("-v", "--voice", is_flag=True, help="Create an audio version of the article")
 @click.option("-r", "--regex", is_flag=True, help="Apply custom regex")
 @click.option("-i", "--input-file", type=str, help="Save urls from an external file")
+@click.option("-p", "--pdfs", type=str, help="Download external pdfs")
 @click.option("-s", "--sync", is_flag=True, help="Start sync")
 def main_cli(**kwargs) -> None:
   params = kwargs
@@ -287,25 +287,25 @@ async def download_files(url: str, httpx_c: httpx.Client) -> str:
   try:
     response = await httpx_c.get(url, follow_redirects=True)
     content_type = response.headers.get('Content-Type', '')
-    if response.status_code == 200:
-      file_obj =  response.content
+    
+    if response.status_code != 200:
+      return f"![error downloading]({url})" # for avoid local images emptys
+      
+    file_obj =  response.content
 
-      # --- Get info image ---
-      file_extension = "." + content_type.split(";")[0].split("/")[1]
-      md5_filename =get_hash(file_obj) + file_extension
-      dst_path = ATTACHMENTS_DIR.joinpath(md5_filename)
+    # --- Get info image ---
+    file_extension = "." + content_type.split(";")[0].split("/")[1]
+    md5_filename = get_hash(file_obj) + file_extension
+    dst_path = ATTACHMENTS_DIR.joinpath(md5_filename)
+      
+    # --- Save image ---
+    with open(dst_path, "wb") as file:
+      file.write(file_obj)
 
-      # --- Save image ---
-      with open(dst_path, "wb") as file:
-        file.write(file_obj)
+    return md5_filename
 
-      return md5_filename
-
-    else:
-      return None
-
-  except Exception:  
-    return None
+  except Exception as e:  
+    return e
 # ====================================
 
 
@@ -333,42 +333,61 @@ def get_wikilinks(md_article: str):
 # ====================================
 
 
+# :::::::::: CATCH BRACKETS ::::::::::
+def catch_brackets(md_article: str) -> list | None:
+  regex_brackets = r"^[!\\[].*\)$"
+  if brackets := re.findall(regex_brackets, md_article, re.MULTILINE):
+    return brackets
+  return []
+# ====================================
+
+
+# :::::::::: CATCH IMG URLS ::::::::::
+def catch_bra_urls(brackets: list) -> list | None:
+  urls_regex = r"http[^)]*(?=\))"
+  if urls := [m.group(0) for url in brackets if (m := re.search(urls_regex, url))]:
+    return urls
+  return []
+# ====================================
+
+
 # :::::::::: BATCH DOWNLOAD ::::::::::
-async def handle_images(md_article: str, wikilinks: tuple,  httpx_c: httpx.Client) -> str:
-  brackets, urls = wikilinks
-
+async def handle_images_old(md_article: str, brackets: list, urls: list, httpx_c: httpx.Client) -> str:
   try:
+    # --- get type ---
     type_tasks = [content_type(url, httpx_c) for url in urls]
-    file_type = await asyncio.gather(*type_tasks, return_exceptions=True)
+    url_type = await asyncio.gather(*type_tasks, return_exceptions=True)
 
-    results = list(zip(brackets, urls, file_type))
+    # --- filter valid images ---
+    valid_imgs: list[tuple] = [(bracket, url) for bracket, url, ext in list(zip(brackets, urls, url_type)) if ext and "image" in ext]
 
-    valid_urls_img = [(bracket, url) for bracket, url, ext in results if ext and "image" in ext]
-
-    if not valid_urls_img:
+    if not valid_imgs:
       return md_article
 
-    down_tasks = [download_files(url, httpx_c) for bracket, url in valid_urls_img]
-    md5_obj = await asyncio.gather(*down_tasks, return_exceptions=True)
+    # --- download images ---
+    down_tasks = [download_files(url, httpx_c) for bracket, url in valid_imgs]
+    md5_imgs = await asyncio.gather(*down_tasks, return_exceptions=True)
 
-    brackets, urls = zip(*valid_urls_img)
-    mapping = list(zip(brackets, urls, md5_obj))
+    mapping = [valid_imgs[i] + (md5_imgs[i],) for i in range(len(md5_imgs))]
 
+    # ---- remove duplicates ---
+    done = set()
     for ext_img, _, local_img in mapping:
-    
+      if ext_img in done:
+        continue
+      done.add(ext_img)
       count = md_article.count(ext_img)
-    
+      
       if count > 1:
-        md_article = re.sub(re.escape(ext_img), "", md_article, count=count - 1)
-  
-      local_img = f"![[{local_img}]]"
-  
-      md_article = re.sub(re.escape(ext_img), local_img, md_article)
-  
+          md_article = md_article.replace(ext_img, "", count - 1)
+      
+      md5_local = f"![[{local_img}]]"
+      md_article = md_article.replace(ext_img, md5_local, 1)  # 
+
     return md_article
-  
+
   except Exception as e:
-    show_message(e)
+    print(e)
 # ====================================
 
 
@@ -621,7 +640,7 @@ def get_markdown(pure_html: str) -> tuple:
   return md_article, author, title, num_words, read_time
 # ====================================
 
-# :::::::::: MAIN ::::::::::
+# :::::::::: MAIN (Old) ::::::::::
 async def main(json_data: dict, json_file: str, progress_bar, task_id, httpx_c: httpx.Client) -> None:
 
   # --- JSON SETTINGS ---
@@ -720,7 +739,8 @@ class ArticleBuilder:
     self.tags = json_data["labels"]
     self.custom_regex = json_data["regex"]
     self.translation = json_data["translate"]
-
+    self.pdfs = json_data["pdfs"]
+    
     # --- Class args(?) ---
     self.json_file = json_file
     self.httpx_c = httpx_c
@@ -736,79 +756,87 @@ class ArticleBuilder:
     self.audio_file = None
     self.pdf_files = None
 
-  # --- Progress update ---
+  # --- UPDATE PROGRESS ---
   def _progress(self, desc: str, advance: int = 10) -> None:
     self.progress_bar.update(self.task_id, advance=advance, description=f"[cyan]{desc}[/cyan]")
 
-
-  # --- Run ---
+  # --- RUN ---
   async def run(self) -> None:
     
-    # --- Get website --- 
+    # --- LOAD PAGE --- 
     pure_html = await self.load_web_site()
     self._progress("Downloading website...")
 
-    # --- Markdown ---
+    # --- MARKDOWN ---
     self._progress("Extracting article...")
     self.md_article, self.author, self.title, self.num_words, self.read_time = \
       await asyncio.to_thread(get_markdown, pure_html)
     
-    # --- Custom Regex --- 
+    # --- REGEX --- 
     if self.custom_regex and RULES_REGEX:
       self._progress("Applying regex rules...")
       self.md_article = apply_custom_regex(self.md_article)
 
-    # --- Translate ---
+    # --- TRANSLATE ---
     article_lang = langid.classify(self.title)[0].upper()
     if self.translation and article_lang != DEFAULT_LANGUAGE:
       self._progress("Translating...")
       self.md_article = await self.handle_translate(self.md_article)
       self.title = sanitize_text(await self.handle_translate(self.title))
     
-    # --- Audio note --- 
+    # --- AUDIO NOTE --- 
     if self.voice and self.read_time < READING_THRESHOLD:
-      self._progress("Generating audio")
+      self._progress("Generating audio...")
       audio_name = get_hash(self.title.encode("utf-8"))
       self.audio_file = f"![[{audio_name}.mp3]]"
       plain_text = convert_to_plain_text(self.md_article)
       await asyncio.to_thread(text_to_voice, plain_text, audio_name)
 
-    # --- Images ---
-    self._progress("Downloading images")
-    wikilinks = get_wikilinks(self.md_article)
-    self.md_article = await self.handle_images(wikilinks)
+    # --- IMAGES ---
+    self._progress("Downloading images...")
+    brackets = catch_brackets(self.md_article)
+    urls = catch_bra_urls(brackets)
+    
+    self.md_article = await self.handle_images(brackets, urls)
     
     # --- PDFS ---
-    self._progress("Extracting pdfs")
-    self.pdf_files = await self.get_pdfs()
+    if self.pdfs:
+      self._progress("Extracting pdfs...")
+      self.pdf_files = await self.get_pdfs()
 
-    # --- Template ---
-    self._progress("Building template")
+    # --- TEMPLATE ---
+    self._progress("Building template...")
     note_templated = self.build_note()
 
-    # --- Saving and deleting ---
-    self._progress("Saving file")
+    # --- SAVE ARTICLE ---
+    self._progress("Saving file...")
     save_to_file(sanitize_text(self.title), note_templated)
+    
+    # --- DELETE JSON ---
     delete_json(self.json_file)
     self.progress_bar.update(self.task_id, completed=100)
-
+    
+  # :::::::::: CLASS - LOAD WEB PAGE ::::::::::
   async def load_web_site(self) -> str:
     response = await self.httpx_c.get(self.url, follow_redirects=True)
     if response.status_code == 200:
       return response.text
     raise Exception(f"loading website {response.status_code}")
+  # ====================================
 
+
+  # :::::::::: CLASS - TRANSLATE ::::::::::
   async def handle_translate(self, text: str) -> str:
     md_styles_pattern = r"^[!\|\[$-]"
   
-    # --- Split in paragraphs ---
+    # Split in paragraphs
     org_chunks = [
       chunk
       for chunk in text.splitlines()
       if chunk and not re.match(md_styles_pattern, chunk)
     ]
 
-    # --- Limit tasks ---
+    # Limit tasks
     semaphore = asyncio.Semaphore(4)
   
     async def rate_limit(chunk: str):
@@ -827,44 +855,50 @@ class ArticleBuilder:
       translated_article = re.sub(re.escape(original_chunk), translated_chunk, translated_article, count=1)
   
     return translated_article
-  
-  # --- DOWNLOAD IMAGES ---
-  async def handle_images(self, wikilinks: tuple) -> str:
-    brackets, urls = wikilinks
+  # ====================================
 
+
+  # ::::::::::: CLASS - HANDLE IMAGES ::::::::::
+  async def handle_images(self, brackets: list, urls: list) -> str:
     try:
+      # --- get type ---
       type_tasks = [content_type(url, self.httpx_c) for url in urls]
       file_type = await asyncio.gather(*type_tasks, return_exceptions=True)
   
-      results = list(zip(brackets, urls, file_type))
+      # --- filter valid images ---
+      valid_imgs: list[tuple] = [(bracket, url) for bracket, url, ext in list(zip(brackets, urls, file_type)) if ext and "image" in ext]
   
-      valid_urls_img = [(bracket, url) for bracket, url, ext in results if ext and "image" in ext]
-  
-      if not valid_urls_img:
+      if not valid_imgs:
         return self.md_article
   
-      down_tasks = [download_files(url, self.httpx_c) for bracket, url in valid_urls_img]
-      md5_obj = await asyncio.gather(*down_tasks, return_exceptions=True)
+      # --- download images ---
+      down_tasks = [download_files(url, self.httpx_c) for bracket, url in valid_imgs]
+      md5_imgs = await asyncio.gather(*down_tasks, return_exceptions=True)
   
-      brackets, urls = zip(*valid_urls_img)
-      mapping = list(zip(brackets, urls, md5_obj))
+      mapping = [valid_imgs[i] + (md5_imgs[i],) for i in range(len(md5_imgs))]
   
+      # ---- remove duplicates ---
+      done = set()
       for ext_img, _, local_img in mapping:
-      
+        if ext_img in done:
+          continue
+        done.add(ext_img)
         count = self.md_article.count(ext_img)
-      
+        
         if count > 1:
-          self.md_article = re.sub(re.escape(ext_img), "", self.md_article, count=count - 1)
-    
-        local_img = f"![[{local_img}]]"
-    
-        self.md_article = re.sub(re.escape(ext_img), local_img, self.md_article)
-    
+            self.md_article = self.md_article.replace(ext_img, "", count - 1)
+        
+        md5_local = f"![[{local_img}]]"
+        self.md_article = self.md_article.replace(ext_img, md5_local, 1)  # 
+  
       return self.md_article
-    
+
     except Exception as e:
       show_message(e)
+  # ====================================
 
+
+  # :::::::::: GET PDFS ::::::::::
   async def get_pdfs(self) -> str | None:
     try:
       # --- Find all urls ---
@@ -903,7 +937,7 @@ class ArticleBuilder:
     except Exception as e:
       show_message(f"pdf {e}")
       
-    
+  # --- Build Note ----
   def build_note(self) -> str:
     article_params = (
       self.creation_date, self.author, self.num_words, self.read_time,
@@ -911,7 +945,7 @@ class ArticleBuilder:
       self.audio_file, self.pdf_files,
     )
     return build_template(*article_params)
-# ====================================
+  # ====================================
 
 
 # :::::::::: RUN SYNC ::::::::::
@@ -935,19 +969,26 @@ async def handle_sync() -> None:
     show_message("Nothing to sync")
     return
   
+  
   semaphore = asyncio.Semaphore(4)
   
   custom_bar = r"{task.percentage}% - {task.description} ([yellow]{task.fields[filename]}[/yellow])"
   
-  with Progress(SpinnerColumn(), TextColumn(custom_bar), refresh_per_second=5) as progress_bar:
-    async with httpx.AsyncClient(headers={"User-Agent": USERAGENT}) as httpx_c:
-      await asyncio.gather(*(run_sync(json_data[0], json_data[1], semaphore, progress_bar, httpx_c) for json_data in articles_json), return_exceptions=True)
+  try:
+    
+    with Progress(SpinnerColumn(), TextColumn(custom_bar), refresh_per_second=5) as progress_bar:
+      async with httpx.AsyncClient(headers={"User-Agent": USERAGENT}) as httpx_c:
+        await asyncio.gather(*(run_sync(json_data[0], json_data[1], semaphore, progress_bar, httpx_c) for json_data in articles_json), return_exceptions=True)
+        console.print("[bold green]✓ Sync Finished[/bold green]")
   
-  console.print("[bold green]✓ Sync Finished[/bold green]")
+  except Exception:
+    console.print("[bold red]✓ Sync Failed[/bold red]")
 # ====================================
 
 
 if __name__ == "__main__":
   main_cli()
-
-
+  
+  
+  
+  
