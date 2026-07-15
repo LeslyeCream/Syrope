@@ -11,9 +11,11 @@ import re
 import yaml
 import click
 import httpx
+import mistune
 import edge_tts
 import validators
 import questionary
+from loguru import logger
 import py3langid as langid
 from rich.table import Table
 from pydefuddle import defuddle
@@ -36,7 +38,7 @@ from markdown_plain_text.extention import convert_to_plain_text
 # Replace build_template to kwargs(?())
 # ✔️ Add detailed information during sync
 # ✔️ Only create audio if the article length is < n
-# Using a class in main
+# ✔️ Using a class in main
 # ====================================
 
 
@@ -61,7 +63,6 @@ DEFAULT_LANGUAGE = settings["OTHERS"]["DEFAULT_LANGUAGE"]
 REQUEST_TIMEOUT = settings["OTHERS"]["REQUEST_TIMEOUT"]
 READING_THRESHOLD = settings["OTHERS"]["READING_THRESHOLD"]
 WPM = settings["OTHERS"]["WPM"]
-
 DEL_SYNCED_ARTICLES = settings["OTHERS"]["DEL_SYNCED_ARTICLES"]
 USERAGENT = settings["OTHERS"]["USERAGENT"]
 TTS_VOICE = settings["OTHERS"]["TTS_VOICE"]
@@ -75,8 +76,11 @@ API_KEY = settings["API"]["API_KEY"]
 
 # --- REGEX ---
 RULES_REGEX = settings["REGEX"]
-
 URL_REGEX = r"https?://(?:www\.)?[-a-zA-Z0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9]{1,6}\b(?:[-a-zA-Z0-9@:%_\+.~#?&/=]*)"
+
+# --- LOGS ---
+LOG_FILE = Path(__file__).parent /  "logs.log" 
+logger.add(LOG_FILE, format="\n" + "="*50 + "\n{time: HH:mm:ss} | {level} | LINE: {line} \n" + "="*50 + "\n")
 
 # --- CHECK FOLDERS ---
 for folder_path in [OFFLINE_DIR, ARTICLES_DIR, ATTACHMENTS_DIR, ARTICLES_SYNCED_DIR]:
@@ -84,7 +88,7 @@ for folder_path in [OFFLINE_DIR, ARTICLES_DIR, ATTACHMENTS_DIR, ARTICLES_SYNCED_
 # ====================================
 
 
-# --- Trackback handler ---
+# --- Trackback Handler ---
 install(show_locals=True)
 console = Console()
 langid.set_languages(TRANSLATE_LANGUAGES)
@@ -93,10 +97,7 @@ langid.set_languages(TRANSLATE_LANGUAGES)
 # :::::::::: TUI - MAIN ::::::::::
 def main_tui() -> None:
   while True:
-    action = questionary.select(
-      "What do you want to do?",
-      choices=["1. Sync articles", "2. View saved articles", "3. Add URL", "4. Exit"],
-    ).ask()
+    action = questionary.select("What do you want to do?", choices=["1. Sync articles", "2. View saved articles", "3. Add URL", "4. Exit"],).ask()
   
     match action:
       case "1. Sync articles":
@@ -115,10 +116,7 @@ def main_tui() -> None:
 
 # :::::::::: TUI - ADD URL ::::::::::
 def menu_add_url() -> None:
-  option = questionary.select(
-    "How do you want to add it?",
-    choices=["1. Single URL", "2. From file", "3. Back"],
-  ).ask()
+  option = questionary.select("How do you want to add it?", choices=["1. Single URL", "2. From file", "3. Back"],).ask()
 
   match option:
     case "1. Single URL":
@@ -133,8 +131,7 @@ def menu_add_url() -> None:
 # :::::::::: JSON DATA ::::::::::
 def get_json_data(json_path: Path) -> str:
   with open(json_path, "r", encoding="utf-8") as f:
-    json_content = json.load(f)
-    return json_content
+    return json.load(f)
 # ====================================
 
 
@@ -156,6 +153,7 @@ def view_saved_articles() -> None:
     table.add_column("Created", style="yellow", justify="center")
     table.add_column("Attributes", style="green", justify="center")
 
+    # --- Get Attributes ---
     for data in json_data:
       valid_attr = [k for k, v in data.items() if v and k not in ["url", "sync", "creation_date", "input_file"]]
       attributes = " - ".join(valid_attr)
@@ -207,11 +205,7 @@ def save_multiples_url(input_file: str, params: dict) -> None:
   # --- Load urls from file ---
   with open(input_file, "r", encoding="utf-8") as f:
     content = f.readlines()
-    valid_urls = [
-      remove_tracking_param(url.strip())
-      for url in content
-      if validators.url(url.strip())
-    ]
+    valid_urls = [remove_tracking_param(url.strip()) for url in content if validators.url(url.strip())]
 
   # --- Save each url ---
   for url in valid_urls:
@@ -221,6 +215,7 @@ def save_multiples_url(input_file: str, params: dict) -> None:
     unique_params["url"] = url
     # del unique_params["input_file"]
     save_changes_on_file(unique_params)
+  
   show_message(f"{len(valid_urls)} urls saved!")
 # ====================================
 
@@ -236,15 +231,14 @@ def save_single_url(url: str, params: dict) -> None:
   params.update(creation_date)
   params["url"] = remove_tracking_param(url)
   save_changes_on_file(params)
+  
   show_message("Url saved!")
 # ====================================
 
 
 # ::::::::::REMOVE TRACKING PARAMETERS ::::::::::
 def remove_tracking_param(url: str) -> str:
-  tracking_regex = r"[?&]utm[^&]*"
-  url = re.sub(tracking_regex, "", url)
-  return url
+  return re.sub(r"[?&]utm[^&]*", "", url)
 # ====================================
 
 
@@ -262,23 +256,16 @@ def save_changes_on_file(params: dict) -> None:
 
 
 # :::::::::: GET WEB PAGE ::::::::::
-async def load_web_site(url: str, httpx_c: httpx.Client) -> str:
-  try:
-    response = await httpx_c.get(url, follow_redirects=True)
-    if response.status_code == 200:
-      return response.text
-    
-    raise Exception(f"loading website {response.status_code}")
-  
-  except Exception as e:
-    raise Exception(e)
+@logger.catch
+async def load_web_site(url: str, httpx_c: httpx.Client) -> str | None:
+  response = await httpx_c.get(url, follow_redirects=True)
+  return response.text if response.status_code == 200 else None
 # ====================================
 
 
 # :::::::::: GET HASH MD5 ::::::::::
 def get_hash(text: bytes) -> str:
-  hash_md5 = hashlib.md5(text).hexdigest()
-  return hash_md5
+  return hashlib.md5(text).hexdigest()
 # ====================================
 
 
@@ -289,7 +276,7 @@ async def download_files(url: str, httpx_c: httpx.Client) -> str:
     content_type = response.headers.get('Content-Type', '')
     
     if response.status_code != 200:
-      return f"![error downloading]({url})"
+      return f"![error downloading]({url})" # for avoid local images emptys
       
     file_obj =  response.content
 
@@ -304,22 +291,19 @@ async def download_files(url: str, httpx_c: httpx.Client) -> str:
 
     return md5_filename
 
-  except Exception as e:  
-    return e
+  except Exception:  
+    logger.exception("Error downloading images")
 # ====================================
 
 
 # :::::::::: CONTENT TYPE ::::::::::
+@logger.catch
 async def content_type(url: str, httpx_c: httpx.Client) -> str | None:
-  try:
-    response = await httpx_c.head(url, follow_redirects=True)
-    return response.headers.get("content-type")
-
-  except Exception:
-    return None
+  response = await httpx_c.head(url, follow_redirects=True)
+  return response.headers.get("content-type") if response.status_code == 200 else None
 # ====================================
 
-
+"""
 # :::::::::: GET WIKILINKS ::::::::::
 def get_wikilinks(md_article: str):
   regex_brackets = r"^[!\[].*\)$"
@@ -331,79 +315,55 @@ def get_wikilinks(md_article: str):
 
   return [], []
 # ====================================
-
+"""
 
 # :::::::::: CATCH BRACKETS ::::::::::
 def catch_brackets(md_article: str) -> list | None:
   regex_brackets = r"^[!\\[].*\)$"
-  if brackets := re.findall(regex_brackets, md_article, re.MULTILINE):
-    return brackets
-  return []
+  return brackets if (brackets := re.findall(regex_brackets, md_article, re.MULTILINE)) else []
 # ====================================
 
 
 # :::::::::: CATCH IMG URLS ::::::::::
 def catch_bra_urls(brackets: list) -> list | None:
   urls_regex = r"http[^)]*(?=\))"
-  if urls := [m.group(0) for url in brackets if (m := re.search(urls_regex, url))]:
-    return urls
-  return []
+  return urls if (urls := [m.group(0) for url in brackets if (m := re.search(urls_regex, url))]) else []
 # ====================================
 
 
-# :::::::::: BATCH DOWNLOAD ::::::::::
-async def handle_images_old(md_article: str, brackets: list, urls: list, httpx_c: httpx.Client) -> str:
-  try:
-    # --- get type ---
-    type_tasks = [content_type(url, httpx_c) for url in urls]
-    url_type = await asyncio.gather(*type_tasks, return_exceptions=True)
-
-    # --- filter valid images ---
-    valid_imgs: list[tuple] = [(bracket, url) for bracket, url, ext in list(zip(brackets, urls, url_type)) if ext and "image" in ext]
-
-    if not valid_imgs:
-      return md_article
-
-    # --- download images ---
-    down_tasks = [download_files(url, httpx_c) for bracket, url in valid_imgs]
-    md5_imgs = await asyncio.gather(*down_tasks, return_exceptions=True)
-
-    mapping = [valid_imgs[i] + (md5_imgs[i],) for i in range(len(md5_imgs))]
-
-    # ---- remove duplicates ---
-    done = set()
-    for ext_img, _, local_img in mapping:
-      if ext_img in done:
-        continue
-      done.add(ext_img)
-      count = md_article.count(ext_img)
-      
-      if count > 1:
-          md_article = md_article.replace(ext_img, "", count - 1)
-      
-      md5_local = f"![[{local_img}]]"
-      md_article = md_article.replace(ext_img, md5_local, 1)  # 
-
-    return md_article
-
-  except Exception as e:
-    print(e)
+# :::::::::: SANITIZE FILENAME ::::::::::
+def sanitize_text(text: str) -> str:
+  cleaned_text = re.sub(r'[\\/:*?"<>|\.]+', "", text)
+  return cleaned_text[:200]
 # ====================================
 
 
-# :::::::::: SANITIZE INLINE TITLE ::::::::::
-def sanitize_text(title: str) -> str:
-  pattern = re.compile(r'[*"\\/<>:|?¿]')
-
-  clean_title: str = pattern.sub("", title)
+# ::::: LOCAL TRANSLATE :::::
+async def local_translate(text: str, httpx_c: httpx.Client) -> str:
+  url = "http://10.111.222.1:7777/v1/chat/completions" 
+  params={"model": "default", "messages": [{"role": "system", "content": "665"}, {"role": "user", "content": text}], "temperature": 0.3}
   
-  return clean_title
+  try:
+    response = await httpx_c.post(url, json=params, headers={"Authorization": "Bearer bbb"}, timeout=60)
+    return response.json()["choices"][0]["message"]["content"].strip() if response.status_code == 200 else text
+    
+  except Exception:
+    logger.exception("Error translating text")
+    return text
 # ====================================
 
 
 # :::::::::: CLOUDFLARE TRANSLATE ::::::::::
 async def cloudfare_translate(txt_translate: str, httpx_c: httpx.Client) -> str:
-  prompt = f"""Only the answer. Translate "{txt_translate}" to {DEFAULT_LANGUAGE} language."""
+  prompt = f"""
+  Translate the following text into {DEFAULT_LANGUAGE}.
+  Keep the original meaning, tone, and logic completely unchanged.
+  Use natural, fluent, and accurate expressions.
+  Do not add extra explanations or comments.
+  Output only the translated result.
+  Text to translate: {txt_translate}
+  """
+
   headers: dict = {
     "Authorization": f"Bearer {API_KEY}",
     "Content-Type": "application/json",
@@ -417,28 +377,22 @@ async def cloudfare_translate(txt_translate: str, httpx_c: httpx.Client) -> str:
 
   try:
     response = await httpx_c.post(CLOUDFARE_URL, headers=headers, json=body)
-    if response.status_code == 200:
-      answer_content = response.json()
-      return answer_content["result"]["response"]
-    else:
-      return txt_translate
+    answer_content = response.json()["result"]["response"] 
+    return answer_content if response.status_code == 200 else txt_translate
 
   except Exception:
+    logger.exception("Error translating with cloudfare")
     return txt_translate
 # ===================================
 
 
-# :::::::::: TRANSLATE ::::::::::
+"""
+# :::::::::: TRANSLATE - OLD ::::::::::
 async def handle_translate(md_article: str, httpx_c: httpx.Client) -> str:
   md_styles_pattern = r"^[!\|\[$-]"
 
   # --- Split in paragraphs ---
-  org_chunks = [
-    chunk
-    for chunk in md_article.splitlines()
-    if chunk and not re.match(md_styles_pattern, chunk)
-  ]
-
+  org_chunks = [chunk for chunk in md_article.splitlines() if chunk and not re.match(md_styles_pattern, chunk)]
 
   # --- Limit tasks ---
   semaphore = asyncio.Semaphore(4)
@@ -460,7 +414,7 @@ async def handle_translate(md_article: str, httpx_c: httpx.Client) -> str:
 
   return translated_article
 # ====================================
-
+"""
 
 # :::::::::: REGEX RULES (CONTENT) ::::::::::
 def apply_custom_regex(content: str) -> str:
@@ -479,13 +433,9 @@ def save_to_file(name_file: str, content: str) -> None:
 
 
 # :::::::::: FORMAT TAGS ::::::::::
-def format_tags(tags: str) -> str:
-  if not tags:
-    return None
-  
-  else:
-    x_tags = tags.split(",")
-    return "\n" + "".join(f"  - {i}\n" for i in x_tags)
+def format_tags(tags: str) -> str | None:
+  x_tags = tags.split(",")
+  return "\n" + "".join(f"  - {i}\n" for i in x_tags) if not tags else None
 # ====================================
 
 
@@ -534,11 +484,7 @@ def del_properties(text: str, properties: Iterator[str]):
 # :::::::::: DELETE / MOVE JSON FINISHED ::::::::::
 def delete_json(json_path: Path) -> None:
   done_path = ARTICLES_SYNCED_DIR.joinpath(json_path.name)
-
-  if DEL_SYNCED_ARTICLES:
-    json_path.unlink(missing_ok=True)
-  else:
-    json_path.rename(done_path)
+  json_path.unlink(missing_ok=True) if DEL_SYNCED_ARTICLES else json_path.rename(done_path)
 # ====================================
 
 
@@ -549,68 +495,49 @@ def show_message(msg: str, custom_style="Bold") -> None:
 
 
 # :::::::::: MICROSOFT EDGE TTS ::::::::::
+@logger.catch
 def text_to_voice(text: str, name_file: str) -> None:
   output_audio_file = ATTACHMENTS_DIR.joinpath(f"{name_file}.mp3")
-  try:
-    communicate = edge_tts.Communicate(text, TTS_VOICE)
-    communicate.save_sync(output_audio_file)
-  except Exception as e:
-    show_message(e)
+  communicate = edge_tts.Communicate(text, TTS_VOICE)
+  communicate.save_sync(output_audio_file)
 # ====================================
 
 
 # :::::::::: GET PDFS ::::::::::
-async def get_pdfs(md_article: str, httpx_c: httpx.Client) -> str:
-  try:
-    # --- Find all urls ---
-    all_urls = re.findall(URL_REGEX, md_article, re.MULTILINE)
+@logger.catch
+async def get_pdfs(md_article: str, httpx_c: httpx.Client) -> str | None:
+  # --- Find all urls ---
+  all_urls = re.findall(URL_REGEX, md_article, re.MULTILINE)
 
-    filetype_results = await asyncio.gather(
-    *[get_file_bytes(url, httpx_c) for url in all_urls],
-    return_exceptions=True
-    )
+  filetype_results = await asyncio.gather(*[get_file_bytes(url, httpx_c) for url in all_urls], return_exceptions=True)
 
-    valid_pdf_urls = [
-    url
-    for result in filetype_results
-    if result and not isinstance(result, Exception)
-    for data, url in [result]
-    if data and data.startswith(b"%PDF")
-    ]
+  valid_pdf_urls = [url for result in filetype_results if result and not isinstance(result, Exception) for data, url in [result] if data and data.startswith(b"%PDF")]
 
-    if not valid_pdf_urls:
-      return None
+  if not valid_pdf_urls:
+    return None
 
-    download_tasks = [download_files(url, httpx_c) for url in valid_pdf_urls]
-    pdfs_md5_names = await asyncio.gather(*download_tasks, return_exceptions=True)
+  download_tasks = [download_files(url, httpx_c) for url in valid_pdf_urls]
+  pdfs_md5_names = await asyncio.gather(*download_tasks, return_exceptions=True)
 
-    pdf_sublist = []
+  pdf_sublist = []
         
-    for ext_pdf, local_pdf in zip(valid_pdf_urls, pdfs_md5_names):
-      pdf_filename = ext_pdf.split("/")[-1]
-      pdf_name_formated = re.sub(r"-|_|%\d{2}|(?<=\.pdf).+$", " ", pdf_filename).capitalize()
-      pdf_sublist.append(f"\t - [{pdf_name_formated}]({local_pdf})\n")
+  for ext_pdf, local_pdf in zip(valid_pdf_urls, pdfs_md5_names):
+    pdf_filename = ext_pdf.split("/")[-1]
+    pdf_name_formated = re.sub(r"-|_|%\d{2}|(?<=\.pdf).+$", " ", pdf_filename).capitalize()
+    pdf_sublist.append(f"\t - [{pdf_name_formated}]({local_pdf})\n")
           
-    header = "- Papers cited in this article:" + "\n"
-    stylized_sublist = header + "".join(pdf_sublist)
+  header = "- Papers cited in this article:" + "\n"
+  stylized_sublist = header + "".join(pdf_sublist)
               
-    return stylized_sublist
-  except Exception as e:
-    show_message(f"pdf {e}")
+  return stylized_sublist
 # ====================================
 
 
 # :::::::::: GET FILE TYPE ::::::::::
+@logger.catch
 async def get_file_bytes(url: str, httpx_c: httpx.Client) -> tuple | None:
-  try:
-    response = await httpx_c.get(url, headers={"Range": "bytes=0-32"}, follow_redirects=True)
-    if not response.status_code == 206:
-      return ""
-    data = response.content
-    return data, url
-  
-  except Exception as e:
-    show_message(f" get file {e}")
+  response = await httpx_c.get(url, headers={"Range": "bytes=0-32"}, follow_redirects=True)
+  return response.content, url if response.status_code == 206 else None
 # ====================================
 
 
@@ -620,7 +547,7 @@ def get_markdown(pure_html: str) -> tuple:
   
   md_article = md(readbility_obj.summary(keep_all_images=True))
 
-  author = readbility_obj.author() if not readbility_obj.author().startswith("[") else None
+  author = sanitize_text(readbility_obj.author()) if not readbility_obj.author().startswith("[") else None
   
   title = sanitize_text(readbility_obj.title())
 
@@ -628,19 +555,111 @@ def get_markdown(pure_html: str) -> tuple:
   
   read_time = num_words // WPM
   
-  """
-  defud_obj = defuddle(pure_html, url=url)
-  md_article = defud_obj.markdown
-  publi_date = defud_obj.published
-  author = defud_obj.author
-  title = sanitize_text(defud_obj.title)
-  num_words = len(md_article.split(" "))
-  read_time = num_words // WPM
-  """
   return md_article, author, title, num_words, read_time
 # ====================================
 
-# :::::::::: MAIN (Old) ::::::::::
+
+# :::: CATCH MARKDOWN PARAGRAPHS (WTF WITH THESE FUNCTIONS 💀😭) :::::
+def catch_md_paragraphs(children):
+  result = []
+  for node in children:
+    node_type = node["type"]
+
+    if node_type == "image":
+      continue
+
+    if node_type == "link":
+      link_text = catch_md_paragraphs(node.get("children", []))
+      url = node.get("attrs", {}).get("url", "")
+      result.append(f"[{link_text}]({url})")
+      continue
+
+    if node_type == "emphasis":
+      inner_text = catch_md_paragraphs(node.get("children", []))
+      result.append(f"*{inner_text}*")
+      continue
+
+    if node_type == "strong":
+      inner_text = catch_md_paragraphs(node.get("children", []))
+      result.append(f"**{inner_text}**")
+      continue
+
+    if node_type == "codespan":
+      text = node.get("raw", "")
+      result.append(f"`{text}`")
+      continue
+
+    if node_type == "strikethrough":
+      inner_text = catch_md_paragraphs(node.get("children", []))
+      result.append(f"~~{inner_text}~~")
+      continue
+
+    if node_type == "underline":
+      inner_text = catch_md_paragraphs(node.get("children", []))
+      result.append(f"<u>{inner_text}</u>")
+      continue
+
+    if node_type == "mark":
+      inner_text = catch_md_paragraphs(node.get("children", []))
+      result.append(f"=={inner_text}==")
+      continue
+
+    if node_type == "subscript":
+      inner_text = catch_md_paragraphs(node.get("children", []))
+      result.append(f"~{inner_text}~")
+      continue
+
+    if node_type == "superscript":
+      inner_text = catch_md_paragraphs(node.get("children", []))
+      result.append(f"^{inner_text}^")
+      continue
+
+    if node_type == "inline_html":
+      text = node.get("raw", "")
+      result.append(text)
+      continue
+
+    text = node.get("raw")
+    if text:
+      result.append(text)
+    elif node_type in ("linebreak", "softbreak"):
+      result.append(" ")
+    elif "children" in node:
+      result.append(catch_md_paragraphs(node["children"]))
+
+  return "".join(result)
+
+
+def is_link_or_img(children):
+  real_nodes = [n for n in children if n["type"] not in ("softbreak", "linebreak")]
+  return len(real_nodes) == 1 and real_nodes[0]["type"] in ("link", "image")
+
+
+def catch_paragraphs(nodes, excluded=False):
+  paragraphs = []
+  for node in nodes:
+    node_type = node["type"]
+
+    if node_type in ("table"):
+      paragraphs.extend(  catch_paragraphs(node.get("children", []), excluded=True))
+      continue
+
+    if node_type == "paragraph":
+      children = node.get("children", [])
+      if not excluded and not is_link_or_img(children):
+        text = catch_md_paragraphs(children).strip()
+        if text:
+          paragraphs.append(text)
+      continue
+
+    if "children" in node:
+      paragraphs.extend(  catch_paragraphs(node["children"], excluded))
+
+  return paragraphs
+# ====================================
+
+"""
+# :::::::::: MAIN - OLD ::::::::::
 async def main(json_data: dict, json_file: str, progress_bar, task_id, httpx_c: httpx.Client) -> None:
 
   # --- JSON SETTINGS ---
@@ -726,7 +745,7 @@ async def main(json_data: dict, json_file: str, progress_bar, task_id, httpx_c: 
 
   progress_bar.update(task_id, completed=100)
 # ====================================
-
+"""
 
 # :::::::::: MAIN CLASS (First attempt) ::::::::::
 class ArticleBuilder:
@@ -747,7 +766,7 @@ class ArticleBuilder:
     self.progress_bar = progress_bar
     self.task_id = task_id
 
-    # --- Instance variables(?) ---
+    # --- Instance attributes(?) ---
     self.md_article = None
     self.author = None
     self.title = None
@@ -766,11 +785,13 @@ class ArticleBuilder:
     # --- LOAD PAGE --- 
     pure_html = await self.load_web_site()
     self._progress("Downloading website...")
-
+    
+    if not pure_html:
+      return
+        
     # --- MARKDOWN ---
     self._progress("Extracting article...")
-    self.md_article, self.author, self.title, self.num_words, self.read_time = \
-      await asyncio.to_thread(get_markdown, pure_html)
+    self.md_article, self.author, self.title, self.num_words, self.read_time = await asyncio.to_thread(get_markdown, pure_html)
     
     # --- REGEX --- 
     if self.custom_regex and RULES_REGEX:
@@ -801,7 +822,7 @@ class ArticleBuilder:
     
     # --- PDFS ---
     if self.pdfs:
-      self._progress("Extracting pdfs...")
+      self._progress("Extracting PDF...")
       self.pdf_files = await self.get_pdfs()
 
     # --- TEMPLATE ---
@@ -815,33 +836,30 @@ class ArticleBuilder:
     # --- DELETE JSON ---
     delete_json(self.json_file)
     self.progress_bar.update(self.task_id, completed=100)
-    
+
+
   # :::::::::: CLASS - LOAD WEB PAGE ::::::::::
-  async def load_web_site(self) -> str:
+  @logger.catch
+  async def load_web_site(self) -> str | None:
     response = await self.httpx_c.get(self.url, follow_redirects=True)
-    if response.status_code == 200:
-      return response.text
-    raise Exception(f"loading website {response.status_code}")
+    return response.text if response.status_code == 200 else None
   # ====================================
 
 
   # :::::::::: CLASS - TRANSLATE ::::::::::
   async def handle_translate(self, text: str) -> str:
-    md_styles_pattern = r"^[!\|\[$-]"
-  
-    # Split in paragraphs
-    org_chunks = [
-      chunk
-      for chunk in text.splitlines()
-      if chunk and not re.match(md_styles_pattern, chunk)
-    ]
+    mistune_inst = mistune.create_markdown(renderer=None)
+    md_tree = mistune_inst(self.md_article)
+    
+    paragraphs =   catch_paragraphs(md_tree)
+    org_chunks = [paraph for paraph in paragraphs if not paraph.startswith("!")]
 
-    # Limit tasks
+    # --- Limit tasks ---
     semaphore = asyncio.Semaphore(4)
   
     async def rate_limit(chunk: str):
       async with semaphore:
-        return await cloudfare_translate(chunk, self.httpx_c) 
+        return await local_translate(chunk, self.httpx_c) 
   
     trans_tasks = [rate_limit(org_chunk) for org_chunk in org_chunks]
   
@@ -859,83 +877,73 @@ class ArticleBuilder:
 
 
   # ::::::::::: CLASS - HANDLE IMAGES ::::::::::
+  @logger.catch
   async def handle_images(self, brackets: list, urls: list) -> str:
-    try:
-      # --- get type ---
-      type_tasks = [content_type(url, self.httpx_c) for url in urls]
-      file_type = await asyncio.gather(*type_tasks, return_exceptions=True)
-  
-      # --- filter valid images ---
-      valid_imgs: list[tuple] = [(bracket, url) for bracket, url, ext in list(zip(brackets, urls, file_type)) if ext and "image" in ext]
-  
-      if not valid_imgs:
-        return self.md_article
-  
-      # --- download images ---
-      down_tasks = [download_files(url, self.httpx_c) for bracket, url in valid_imgs]
-      md5_imgs = await asyncio.gather(*down_tasks, return_exceptions=True)
-  
-      mapping = [valid_imgs[i] + (md5_imgs[i],) for i in range(len(md5_imgs))]
-  
-      # ---- remove duplicates ---
-      done = set()
-      for ext_img, _, local_img in mapping:
-        if ext_img in done:
-          continue
-        done.add(ext_img)
-        count = self.md_article.count(ext_img)
-        
-        if count > 1:
-            self.md_article = self.md_article.replace(ext_img, "", count - 1)
-        
-        md5_local = f"![[{local_img}]]"
-        self.md_article = self.md_article.replace(ext_img, md5_local, 1)  # 
-  
+    # --- get type ---
+    type_tasks = [content_type(url, self.httpx_c) for url in urls]
+    files_type = await asyncio.gather(*type_tasks, return_exceptions=True)
+
+    # --- filter valid images ---
+    valid_imgs: list[tuple] = [(bracket, url) for bracket, url, ext in list(zip(brackets, urls, files_type)) if ext and "image" in ext]
+
+    if not valid_imgs:
       return self.md_article
 
-    except Exception as e:
-      show_message(e)
+    # --- download images ---
+    down_tasks = [download_files(url, self.httpx_c) for bracket, url in valid_imgs]
+    md5_imgs = await asyncio.gather(*down_tasks, return_exceptions=True)
+
+    mapping = [valid_imgs[i] + (md5_imgs[i],) for i in range(len(md5_imgs))]
+
+    # ---- remove duplicates ---
+    done = set()
+    for ext_img, _, local_img in mapping:
+      if ext_img in done:
+        continue
+      done.add(ext_img)
+      count = self.md_article.count(ext_img)
+      
+      if count > 1:
+          self.md_article = self.md_article.replace(ext_img, "", count - 1)
+      
+      md5_local = f"![[{local_img}]]"
+      self.md_article = self.md_article.replace(ext_img, md5_local, 1)  # 
+
+    return self.md_article
   # ====================================
 
 
-  # :::::::::: GET PDFS ::::::::::
+  # :::::::::: CLASS - GET PDFS ::::::::::
+  @logger.catch
   async def get_pdfs(self) -> str | None:
-    try:
-      # --- Find all urls ---
-      all_urls = re.findall(URL_REGEX, self.md_article, re.MULTILINE)
-  
-      filetype_results = await asyncio.gather(
-      *[get_file_bytes(url, self.httpx_c) for url in all_urls],
-      return_exceptions=True
-      )
-  
-      valid_pdf_urls = [
-      url
-      for result in filetype_results
-      if result and not isinstance(result, Exception)
-      for data, url in [result]
-      if data and data.startswith(b"%PDF")
-      ]
-  
-      if not valid_pdf_urls:
-        return None
-  
-      download_tasks = [download_files(url, self.httpx_c) for url in valid_pdf_urls]
-      pdfs_md5_names = await asyncio.gather(*download_tasks, return_exceptions=True)
-  
-      pdf_sublist = []
+    
+    # --- Find all urls ---
+    all_urls = re.findall(URL_REGEX, self.md_article, re.MULTILINE)
+
+    filetype_results = await asyncio.gather(
+    *[get_file_bytes(url, self.httpx_c) for url in all_urls],
+    return_exceptions=True
+    )
+
+    valid_pdf_urls = [url for result in filetype_results if result and not isinstance(result, Exception) for data, url in [result] if data and data.startswith(b"%PDF")]
+
+    if not valid_pdf_urls:
+      return None
+
+    download_tasks = [download_files(url, self.httpx_c) for url in valid_pdf_urls]
+    pdfs_md5_names = await asyncio.gather(*download_tasks, return_exceptions=True)
+
+    pdf_sublist = []
+        
+    for ext_pdf, local_pdf in zip(valid_pdf_urls, pdfs_md5_names):
+      pdf_filename = ext_pdf.split("/")[-1]
+      pdf_name_formated = re.sub(r"-|_|%\d{2}|(?<=\.pdf).+$", " ", pdf_filename).capitalize()
+      pdf_sublist.append(f"\t - [{pdf_name_formated}]({local_pdf})\n")
           
-      for ext_pdf, local_pdf in zip(valid_pdf_urls, pdfs_md5_names):
-        pdf_filename = ext_pdf.split("/")[-1]
-        pdf_name_formated = re.sub(r"-|_|%\d{2}|(?<=\.pdf).+$", " ", pdf_filename).capitalize()
-        pdf_sublist.append(f"\t - [{pdf_name_formated}]({local_pdf})\n")
-            
-      header = "- Papers cited in this article:" + "\n"
-      stylized_sublist = header + "".join(pdf_sublist)
-                
-      return stylized_sublist
-    except Exception as e:
-      show_message(f"pdf {e}")
+    header = "- Papers cited in this article:" + "\n"
+    stylized_sublist = header + "".join(pdf_sublist)
+
+    return stylized_sublist
       
   # --- Build Note ----
   def build_note(self) -> str:
@@ -944,19 +952,23 @@ class ArticleBuilder:
       self.md_article, self.url, format_tags(self.tags),
       self.audio_file, self.pdf_files,
     )
+    
     return build_template(*article_params)
-  # ====================================
+# ====================================
 
 
 # :::::::::: RUN SYNC ::::::::::
-async def run_sync(json_data: dict, json_file: str, semaphore, progress_bar, httpx_c: httpx.Client):
+async def run_sync(json_data: dict, json_file: str, semaphore, progress_bar, httpx_c: httpx.Client) -> None:
   async with semaphore:
     try:
-      task_id = progress_bar.add_task("Procesando...", total=100, filename=json_data["url"])
+      
+      task_id = progress_bar.add_task("Starting...", total=100, filename=json_data["url"])
       processor = ArticleBuilder(json_data, json_file, httpx_c, progress_bar, task_id)
       await processor.run()
       progress_bar.update(task_id, completed=100, description="[green]✓ Done[/green]")
-    except Exception as e: 
+    
+    except Exception as e:
+      logger.exception("run sync")
       progress_bar.update(task_id, description=f"[red]ERROR: [/red] {e}")
 # ====================================
 
@@ -968,7 +980,6 @@ async def handle_sync() -> None:
   if not articles_json:
     show_message("Nothing to sync")
     return
-  
   
   semaphore = asyncio.Semaphore(4)
   
@@ -982,13 +993,10 @@ async def handle_sync() -> None:
         console.print("[bold green]✓ Sync Finished[/bold green]")
   
   except Exception:
-    console.print("[bold red]✓ Sync Failed[/bold red]")
+    console.print("[bold red]Sync Failed[/bold red]")
 # ====================================
 
 
 if __name__ == "__main__":
   main_cli()
-  
-  
-  
   
