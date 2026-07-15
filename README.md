@@ -21,10 +21,14 @@
 
 # How is it different from the Obsidian extension?
 
-Basically, it's the automation. It lets you save all articles at once with custom settings.
+1. Basically, it's the automation. It lets you save all articles at once with custom settings.
 
 - For example, you might prefer to *read* Substack articles that aren't in your language, but you might prefer to *listen* to the latest news articles online. 
 - It doesn't try to compete with or match the scope of Obsidian (although they share many similarities), but rather to recreate the essence of Pocket: copy a URL -> save and sync -> read it later
+
+2. Efficiency in data usage and download size
+
+- Load a website in your browser and save it with the Obsidian extension can use up dozens of megabytes, since it always loads the entire site. This script prevents that and lets you save more websites in less time while using less data. It’s especially useful if you’re on a limited mobile data plan or a slow network.
 
 ## How to use
 
