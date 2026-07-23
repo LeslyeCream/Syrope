@@ -39,6 +39,7 @@ from markdown_plain_text.extention import convert_to_plain_text
 # ✔️ Add detailed information during sync
 # ✔️ Only create audio if the article length is < n
 # ✔️ Using a class in main
+# Avoid making three processes for brackets and urls repeatedly
 # ====================================
 
 
@@ -205,7 +206,7 @@ def save_multiples_url(input_file: str, params: dict) -> None:
   # --- Load urls from file ---
   with open(input_file, "r", encoding="utf-8") as f:
     content = f.readlines()
-    valid_urls = [remove_tracking_param(url.strip()) for url in content if validators.url(url.strip())]
+    valid_urls = [remove_tracking(url.strip()) for url in content if validators.url(url.strip())]
 
   # --- Save each url ---
   for url in valid_urls:
@@ -229,7 +230,7 @@ def save_single_url(url: str, params: dict) -> None:
   creation_date = {"creation_date": dt.now().strftime("%Y-%m-%d %H:%M")}
   params = params.copy()
   params.update(creation_date)
-  params["url"] = remove_tracking_param(url)
+  params["url"] = remove_tracking(url)
   save_changes_on_file(params)
   
   show_message("Url saved!")
@@ -237,8 +238,12 @@ def save_single_url(url: str, params: dict) -> None:
 
 
 # ::::::::::REMOVE TRACKING PARAMETERS ::::::::::
-def remove_tracking_param(url: str) -> str:
-  return re.sub(r"[?&]utm[^&]*", "", url)
+def remove_tracking(url: str) -> str:
+  try:
+    cleaned_url = re.sub(r"utm.+", "", url)
+    return cleaned_url
+  except Exception:
+    return url
 # ====================================
 
 
@@ -298,24 +303,17 @@ async def download_files(url: str, httpx_c: httpx.Client) -> str:
 
 # :::::::::: CONTENT TYPE ::::::::::
 @logger.catch
-async def content_type(url: str, httpx_c: httpx.Client) -> str | None:
+async def get_url_content_type(url: str, httpx_c: httpx.Client, extension="text") -> str | None:
   response = await httpx_c.head(url, follow_redirects=True)
-  return response.headers.get("content-type") if response.status_code == 200 else None
+  
+  if response.status_code != 200: 
+    return None
+  
+  content_type = response.headers.get("content-type")
+
+  return url if content_type and extension in content_type else None
 # ====================================
 
-"""
-# :::::::::: GET WIKILINKS ::::::::::
-def get_wikilinks(md_article: str):
-  regex_brackets = r"^[!\[].*\)$"
-  urls_regex = r"https?://[^\s)\"']+"
-
-  if brackets := re.findall(regex_brackets, md_article, re.MULTILINE):
-    urls = [m.group(0) for url in brackets if (m := re.search(urls_regex, url))]
-    return brackets, urls
-
-  return [], []
-# ====================================
-"""
 
 # :::::::::: CATCH BRACKETS ::::::::::
 def catch_brackets(md_article: str) -> list | None:
@@ -325,7 +323,7 @@ def catch_brackets(md_article: str) -> list | None:
 
 
 # :::::::::: CATCH IMG URLS ::::::::::
-def catch_bra_urls(brackets: list) -> list | None:
+def catch_img_urls(brackets: list) -> list | None:
   urls_regex = r"http[^)]*(?=\))"
   return urls if (urls := [m.group(0) for url in brackets if (m := re.search(urls_regex, url))]) else []
 # ====================================
@@ -339,14 +337,14 @@ def sanitize_text(text: str) -> str:
 
 
 # ::::: LOCAL TRANSLATE :::::
-async def local_translate(text: str, httpx_c: httpx.Client) -> str:
-  url = "http://10.111.222.1:7777/v1/chat/completions" 
-  params={"model": "default", "messages": [{"role": "system", "content": "665"}, {"role": "user", "content": text}], "temperature": 0.3}
+async def local_translate(text: str, in_language: str, httpx_c: httpx.Client) -> str:
+  url = "http://127.0.0.1:7777/translate" 
+  body = {"q": text, "source": in_language, "target": DEFAULT_LANGUAGE.lower()}
   
   try:
-    response = await httpx_c.post(url, json=params, headers={"Authorization": "Bearer bbb"}, timeout=60)
-    return response.json()["choices"][0]["message"]["content"].strip() if response.status_code == 200 else text
-    
+    response = await httpx_c.post(url, json=body, timeout=30)
+    return response.json()["translatedText"].strip() if response.status_code == 200 else text
+  
   except Exception:
     logger.exception("Error translating text")
     return text
@@ -386,36 +384,6 @@ async def cloudfare_translate(txt_translate: str, httpx_c: httpx.Client) -> str:
 # ===================================
 
 
-"""
-# :::::::::: TRANSLATE - OLD ::::::::::
-async def handle_translate(md_article: str, httpx_c: httpx.Client) -> str:
-  md_styles_pattern = r"^[!\|\[$-]"
-
-  # --- Split in paragraphs ---
-  org_chunks = [chunk for chunk in md_article.splitlines() if chunk and not re.match(md_styles_pattern, chunk)]
-
-  # --- Limit tasks ---
-  semaphore = asyncio.Semaphore(4)
-
-  async def rate_limit(chunk: str):
-    async with semaphore:
-      return await cloudfare_translate(chunk, httpx_c) 
-
-  trans_tasks = [rate_limit(org_chunk) for org_chunk in org_chunks]
-
-  trans_chunks: list = await asyncio.gather(*trans_tasks, return_exceptions=True)
-
-  translated_map = dict(zip(org_chunks, trans_chunks))
-  
-  translated_article = md_article
-  
-  for original_chunk, translated_chunk in translated_map.items():
-    translated_article = re.sub(re.escape(original_chunk), translated_chunk, translated_article, count=1)
-
-  return translated_article
-# ====================================
-"""
-
 # :::::::::: REGEX RULES (CONTENT) ::::::::::
 def apply_custom_regex(content: str) -> str:
   for rule in RULES_REGEX:
@@ -441,7 +409,7 @@ def format_tags(tags: str) -> str | None:
 
 # :::::::::: BUILD TEMPLATE ::::::::::
 def build_template(*args) -> str:
-  creation_date, author, num_words, read_time, full_article, url, tags, audio, pdf_files = args
+  creation_date, author, num_words, read_time, full_article, url, tags, audio, pdf_files, resources = args
   
   metadata = {
     "%CREATIONDATE": creation_date,
@@ -452,7 +420,8 @@ def build_template(*args) -> str:
     "%URL": url,
     "%TAGS": tags,
     "%AUDIO": audio,
-    "%PDF": pdf_files
+    "%PDF": pdf_files,
+    "%RESOURCES": resources
   }
 
   missing_values = [key for key, value in metadata.items() if not value]
@@ -537,7 +506,8 @@ async def get_pdfs(md_article: str, httpx_c: httpx.Client) -> str | None:
 @logger.catch
 async def get_file_bytes(url: str, httpx_c: httpx.Client) -> tuple | None:
   response = await httpx_c.get(url, headers={"Range": "bytes=0-32"}, follow_redirects=True)
-  return response.content, url if response.status_code == 206 else None
+  type_file = response.content
+  return (type_file, url) if response.status_code == 206 else None
 # ====================================
 
 
@@ -658,100 +628,45 @@ def catch_paragraphs(nodes, excluded=False):
   return paragraphs
 # ====================================
 
-"""
-# :::::::::: MAIN - OLD ::::::::::
-async def main(json_data: dict, json_file: str, progress_bar, task_id, httpx_c: httpx.Client) -> None:
 
-  # --- JSON SETTINGS ---
-  creation_date = json_data["creation_date"]
-  url = json_data["url"]
-  voice = json_data["voice"]
-  tags = json_data["labels"]
-  custom_regex = json_data["regex"]
-  translation = json_data["translate"]
+# ::::: CATCH RESOURCES :::::
+@logger.catch
+async def catch_resources(md_article: str, httpx_c) -> list | str:
+  regex_brackets = r"[!\\[].*\)"
+  brackets = re.findall(regex_brackets, md_article, re.MULTILINE)
+
+  if brackets:
+    urls_regex = r"http[^)]*(?=\))"
+    website_urls = [remove_tracking(url_match.group(0)) for url in brackets if (url_match := re.search(urls_regex, url))]
+
   
-  # --- LOAD WEB SITE AND GET HTML ---
-  pure_html = await load_web_site(url, httpx_c)
-  progress_bar.update(task_id, advance=10, description="[cyan]Downloading[/cyan] website")
+  # --- get type ---
+  type_tasks = [get_url_content_type(url, httpx_c) for url in website_urls]
+  content_type = await asyncio.gather(*type_tasks, return_exceptions=True)
 
-  # --- MARKDOWN ---
-  progress_bar.update(task_id, advance=10, description="[cyan]Extracting[/cyan] article")
+  # --- filter valid custom content ---
+  valid_content = list(filter(None, content_type))
   
-  md_article, author, title, num_words, read_time = await asyncio.to_thread(get_markdown, pure_html)
-
-  # --- APPLY CUSTOM REGEX ---
-  if custom_regex and RULES_REGEX:
-    progress_bar.update(task_id, advance=10, description="[cyan]Applying[/cyan] regex rules")
-
-    md_article = apply_custom_regex(md_article)
-
-  # --- TRANSLATE ---
-  article_lang = langid.classify(title)[0].upper()
-  if translation and article_lang != DEFAULT_LANGUAGE:
-    progress_bar.update(task_id, advance=10, description="[cyan]Translating[/cyan]")
-    md_article = await handle_translate(md_article, httpx_c)
-    title = sanitize_text(await handle_translate(title, httpx_c))
-
-  # --- EDGE TTS ---
-  audio_file = None
-
-  if voice and read_time < READING_THRESHOLD:
-    progress_bar.update(task_id, advance=10, description="[cyan]Generating[/cyan] audio")
-
-    audio_name = get_hash(title.encode("utf-8"))
-    audio_file = f"![[{audio_name}.mp3]]"
-    plain_text = convert_to_plain_text(md_article)
-
-    await asyncio.to_thread(text_to_voice, plain_text, audio_name)
-
-  # --- IMAGES ---
-
-  progress_bar.update(task_id, advance=10, description="[cyan]Downloading[/cyan] images")
-
-  wikilinks = get_wikilinks(md_article)
-
-  md_article = await handle_images(md_article, wikilinks, httpx_c)
-
-  # --- PDFS FILES ---
-
-  progress_bar.update(task_id, advance=10, description="[cyan]Extracting[/cyan] pdfs")
+  if not valid_content:
+    return None
   
-  pdf_files = await get_pdfs(md_article, httpx_c)
-
-  # --- BUILD TEMPLATE ---
-  progress_bar.update(task_id, advance=10, description="[cyan]Building[/cyan] template")
+  resources_group = "Resources:\n" + "".join(f"\t- {content}\n" for content in valid_content)
   
-  article_params = (
-    creation_date,
-    author,
-    num_words,
-    read_time,
-    md_article,
-    url,
-    format_tags(tags),
-    audio_file,
-    pdf_files,
-  )
-
-  note_templated = build_template(*article_params)
-
-  # --- SAVE FILE ---
-  progress_bar.update(task_id, advance=10, description="[cyan]Saving[/cyan] file")
-
-  save_to_file(sanitize_text(title), note_templated)
-
-  # --- DEL ARTICLE DOWNLOADED ---
-  delete_json(json_file)
-
-  progress_bar.update(task_id, completed=100)
+  return resources_group
 # ====================================
-"""
+
+
+# ::::: REMOVE MARKDOWN LINKS :::::
+def remove_md_links(md_article):
+  return re.sub(r'(?<!\!)\[(?!!)([^\]]+)\]\([^)]+\)', r'\1', md_article)
+# ====================================
+
 
 # :::::::::: MAIN CLASS (First attempt) ::::::::::
 class ArticleBuilder:
   def __init__(self, json_data: dict, json_file: Path, httpx_c: httpx.Client, progress_bar, task_id):
     
-    # --- Metadata ---
+    # --- File Config ---
     self.creation_date = json_data["creation_date"]
     self.url = json_data["url"]
     self.voice = json_data["voice"]
@@ -760,13 +675,13 @@ class ArticleBuilder:
     self.translation = json_data["translate"]
     self.pdfs = json_data["pdfs"]
     
-    # --- Class args(?) ---
+    # --- Attributes ---
     self.json_file = json_file
     self.httpx_c = httpx_c
     self.progress_bar = progress_bar
     self.task_id = task_id
 
-    # --- Instance attributes(?) ---
+    # --- Template metadata ---
     self.md_article = None
     self.author = None
     self.title = None
@@ -774,6 +689,8 @@ class ArticleBuilder:
     self.read_time = None
     self.audio_file = None
     self.pdf_files = None
+    self.resources = None
+
 
   # --- UPDATE PROGRESS ---
   def _progress(self, desc: str, advance: int = 10) -> None:
@@ -792,18 +709,18 @@ class ArticleBuilder:
     # --- MARKDOWN ---
     self._progress("Extracting article...")
     self.md_article, self.author, self.title, self.num_words, self.read_time = await asyncio.to_thread(get_markdown, pure_html)
-    
+
     # --- REGEX --- 
     if self.custom_regex and RULES_REGEX:
       self._progress("Applying regex rules...")
       self.md_article = apply_custom_regex(self.md_article)
 
     # --- TRANSLATE ---
-    article_lang = langid.classify(self.title)[0].upper()
-    if self.translation and article_lang != DEFAULT_LANGUAGE:
+    article_lang = langid.classify(self.title)[0]
+    if self.translation and article_lang.upper() != DEFAULT_LANGUAGE:
       self._progress("Translating...")
-      self.md_article = await self.handle_translate(self.md_article)
-      self.title = sanitize_text(await self.handle_translate(self.title))
+      self.title = sanitize_text(await local_translate(self.title, article_lang, self.httpx_c))
+      self.md_article = await self.handle_translate(self.md_article, article_lang)
     
     # --- AUDIO NOTE --- 
     if self.voice and self.read_time < READING_THRESHOLD:
@@ -816,9 +733,12 @@ class ArticleBuilder:
     # --- IMAGES ---
     self._progress("Downloading images...")
     brackets = catch_brackets(self.md_article)
-    urls = catch_bra_urls(brackets)
-    
+    urls = catch_img_urls(brackets)
     self.md_article = await self.handle_images(brackets, urls)
+    
+    # --- RESOURCES ---
+    self.resources = await catch_resources(self.md_article, self.httpx_c)
+    self.md_article =remove_md_links(self.md_article)
     
     # --- PDFS ---
     if self.pdfs:
@@ -827,8 +747,13 @@ class ArticleBuilder:
 
     # --- TEMPLATE ---
     self._progress("Building template...")
-    note_templated = self.build_note()
-
+    article_params = (
+      self.creation_date, self.author, self.num_words, self.read_time,
+      self.md_article, self.url, format_tags(self.tags),
+      self.audio_file, self.pdf_files, self.resources
+    )
+    note_templated = build_template(*article_params)
+    
     # --- SAVE ARTICLE ---
     self._progress("Saving file...")
     save_to_file(sanitize_text(self.title), note_templated)
@@ -847,7 +772,7 @@ class ArticleBuilder:
 
 
   # :::::::::: CLASS - TRANSLATE ::::::::::
-  async def handle_translate(self, text: str) -> str:
+  async def handle_translate(self, text: str, article_lang: str) -> str:
     mistune_inst = mistune.create_markdown(renderer=None)
     md_tree = mistune_inst(self.md_article)
     
@@ -855,11 +780,11 @@ class ArticleBuilder:
     org_chunks = [paraph for paraph in paragraphs if not paraph.startswith("!")]
 
     # --- Limit tasks ---
-    semaphore = asyncio.Semaphore(4)
+    semaphore = asyncio.Semaphore(8)
   
     async def rate_limit(chunk: str):
       async with semaphore:
-        return await local_translate(chunk, self.httpx_c) 
+        return await local_translate(chunk, article_lang, self.httpx_c) 
   
     trans_tasks = [rate_limit(org_chunk) for org_chunk in org_chunks]
   
@@ -870,6 +795,8 @@ class ArticleBuilder:
     translated_article = text
     
     for original_chunk, translated_chunk in translated_map.items():
+      fixed_brackets = translated_chunk.replace("] (", "](")
+      translated_chunk = fixed_brackets.replace("�", "")
       translated_article = re.sub(re.escape(original_chunk), translated_chunk, translated_article, count=1)
   
     return translated_article
@@ -880,7 +807,7 @@ class ArticleBuilder:
   @logger.catch
   async def handle_images(self, brackets: list, urls: list) -> str:
     # --- get type ---
-    type_tasks = [content_type(url, self.httpx_c) for url in urls]
+    type_tasks = [get_url_content_type(url, self.httpx_c, extension="image") for url in urls]
     files_type = await asyncio.gather(*type_tasks, return_exceptions=True)
 
     # --- filter valid images ---
@@ -944,13 +871,15 @@ class ArticleBuilder:
     stylized_sublist = header + "".join(pdf_sublist)
 
     return stylized_sublist
-      
+
+
+  # :::::::::: CLASS - BUILD NOTE ::::::::::
   # --- Build Note ----
   def build_note(self) -> str:
     article_params = (
       self.creation_date, self.author, self.num_words, self.read_time,
       self.md_article, self.url, format_tags(self.tags),
-      self.audio_file, self.pdf_files,
+      self.audio_file, self.pdf_files, self.resources
     )
     
     return build_template(*article_params)
@@ -987,7 +916,7 @@ async def handle_sync() -> None:
   
   try:
     
-    with Progress(SpinnerColumn(), TextColumn(custom_bar), refresh_per_second=5) as progress_bar:
+    with Progress(SpinnerColumn(), TextColumn(custom_bar), refresh_per_second=15) as progress_bar:
       async with httpx.AsyncClient(headers={"User-Agent": USERAGENT}) as httpx_c:
         await asyncio.gather(*(run_sync(json_data[0], json_data[1], semaphore, progress_bar, httpx_c) for json_data in articles_json), return_exceptions=True)
         console.print("[bold green]✓ Sync Finished[/bold green]")
@@ -999,4 +928,5 @@ async def handle_sync() -> None:
 
 if __name__ == "__main__":
   main_cli()
+  
   
