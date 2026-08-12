@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import sys
+import uuid
 import re
 
 import yaml
@@ -14,6 +15,7 @@ import httpx
 import mistune
 import edge_tts
 import validators
+import frontmatter
 import questionary
 from loguru import logger
 import py3langid as langid
@@ -27,7 +29,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from markdown_plain_text.extention import convert_to_plain_text
 
 
-# :::::::::: TO-DO :::::::::::
+# :::::::::: TO-DO ::::::::::
 # ✔️ Add Translate
 # ✔️ @click
 # ✔️ Add Download for PDF articles
@@ -279,7 +281,7 @@ async def download_files(url: str, httpx_c: httpx.Client) -> str:
   try:
     response = await httpx_c.get(url, follow_redirects=True)
     content_type = response.headers.get('Content-Type', '')
-    
+
     if response.status_code != 200:
       return f"![error downloading]({url})" # for avoid local images emptys
       
@@ -302,7 +304,7 @@ async def download_files(url: str, httpx_c: httpx.Client) -> str:
 
 
 # :::::::::: CONTENT TYPE ::::::::::
-@logger.catch
+logger.catch(reraise=False)
 async def get_url_content_type(url: str, httpx_c: httpx.Client, extension="text") -> str | None:
   response = await httpx_c.head(url, follow_redirects=True)
   
@@ -331,18 +333,20 @@ def catch_img_urls(brackets: list) -> list | None:
 
 # :::::::::: SANITIZE FILENAME ::::::::::
 def sanitize_text(text: str) -> str:
-  cleaned_text = re.sub(r'[\\/:*?"<>|\.]+', "", text)
+  forbidden_chars = r"[\[\]#^\\|*'\"/:?¿¡<>]"
+  cleaned_text = re.sub(forbidden_chars, "", text)
   return cleaned_text[:200]
 # ====================================
 
 
-# ::::: LOCAL TRANSLATE :::::
+# :::::::::: LOCAL TRANSLATE ::::::::::
 async def local_translate(text: str, in_language: str, httpx_c: httpx.Client) -> str:
   url = "http://127.0.0.1:7777/translate" 
   body = {"q": text, "source": in_language, "target": DEFAULT_LANGUAGE.lower()}
   
   try:
     response = await httpx_c.post(url, json=body, timeout=30)
+    response.encoding = 'utf-8'
     return response.json()["translatedText"].strip() if response.status_code == 200 else text
   
   except Exception:
@@ -409,7 +413,7 @@ def format_tags(tags: str) -> str | None:
 
 # :::::::::: BUILD TEMPLATE ::::::::::
 def build_template(*args) -> str:
-  creation_date, author, num_words, read_time, full_article, url, tags, audio, pdf_files, resources = args
+  title, creation_date, author, num_words, read_time, full_article, url, tags, audio, pdf_files, resources, site, language = args
   
   metadata = {
     "%CREATIONDATE": creation_date,
@@ -421,7 +425,9 @@ def build_template(*args) -> str:
     "%TAGS": tags,
     "%AUDIO": audio,
     "%PDF": pdf_files,
-    "%RESOURCES": resources
+    "%RESOURCES": f"'[[{resources}|{sanitize_text(title)}]]'",
+    "%SITE": site,
+    "%LANGUAGE": language
   }
 
   missing_values = [key for key, value in metadata.items() if not value]
@@ -429,7 +435,7 @@ def build_template(*args) -> str:
     template = f.read()
   
   if missing_values:
-    template = del_properties(template, missing_values)
+    template = del_unused_yaml(template, missing_values)
   
   for var, value in filter(lambda item: item[0] not in missing_values, metadata.items()):
     if var in template:
@@ -440,7 +446,7 @@ def build_template(*args) -> str:
 
 
 # :::::::::: DEL UNUSED PROPERTIES ::::::::::
-def del_properties(text: str, properties: Iterator[str]):
+def del_unused_yaml(text: str, properties: Iterator[str]):
   props_to_del = "|".join(properties)
 
   valid_lines = [line for line in text.split("\n") if not re.search(props_to_del, line)]
@@ -510,7 +516,7 @@ async def get_file_bytes(url: str, httpx_c: httpx.Client) -> tuple | None:
   return (type_file, url) if response.status_code == 206 else None
 # ====================================
 
-
+"""
 # :::::::::: MARKDOWN AND METADATA ::::::::::
 def get_markdown(pure_html: str) -> tuple:
   readbility_obj = Document(pure_html)
@@ -527,9 +533,9 @@ def get_markdown(pure_html: str) -> tuple:
   
   return md_article, author, title, num_words, read_time
 # ====================================
+"""
 
-
-# :::: CATCH MARKDOWN PARAGRAPHS (WTF WITH THESE FUNCTIONS 💀😭) :::::
+# :::::::::: CATCH MARKDOWN PARAGRAPHS (WTF WITH THESE FUNCTIONS 💀😭) ::::::::::
 def catch_md_paragraphs(children):
   result = []
   for node in children:
@@ -628,10 +634,9 @@ def catch_paragraphs(nodes, excluded=False):
   return paragraphs
 # ====================================
 
-
-# ::::: CATCH RESOURCES :::::
+# ::::::::::SAVE RESOURCES ::::::::::
 @logger.catch
-async def catch_resources(md_article: str, httpx_c) -> list | str:
+async def save_sources(md_article: str, httpx_c) -> list | str:
   regex_brackets = r"[!\\[].*\)"
   brackets = re.findall(regex_brackets, md_article, re.MULTILINE)
 
@@ -639,7 +644,6 @@ async def catch_resources(md_article: str, httpx_c) -> list | str:
     urls_regex = r"http[^)]*(?=\))"
     website_urls = [remove_tracking(url_match.group(0)) for url in brackets if (url_match := re.search(urls_regex, url))]
 
-  
   # --- get type ---
   type_tasks = [get_url_content_type(url, httpx_c) for url in website_urls]
   content_type = await asyncio.gather(*type_tasks, return_exceptions=True)
@@ -649,14 +653,17 @@ async def catch_resources(md_article: str, httpx_c) -> list | str:
   
   if not valid_content:
     return None
-  
-  resources_group = "Resources:\n" + "".join(f"\t- {content}\n" for content in valid_content)
-  
-  return resources_group
+
+  md5_filename = f"{get_hash(uuid.uuid4().bytes)}.md"
+  output_path = ATTACHMENTS_DIR / md5_filename
+  with open(output_path, "w") as f:
+    f.write("".join(f"{link}\n" for link in valid_content))
+
+  return md5_filename
 # ====================================
 
 
-# ::::: REMOVE MARKDOWN LINKS :::::
+# :::::::::: REMOVE MARKDOWN LINKS ::::::::::
 def remove_md_links(md_article):
   return re.sub(r'(?<!\!)\[(?!!)([^\]]+)\]\([^)]+\)', r'\1', md_article)
 # ====================================
@@ -687,6 +694,8 @@ class ArticleBuilder:
     self.title = None
     self.num_words = None
     self.read_time = None
+    self.site = None
+    self.language = None
     self.audio_file = None
     self.pdf_files = None
     self.resources = None
@@ -699,16 +708,27 @@ class ArticleBuilder:
   # --- RUN ---
   async def run(self) -> None:
     
-    # --- LOAD PAGE --- 
+    # --- LOAD PAGE ---
+    self.url_defuddle = re.sub(r"^https\:\/\/", "https://defuddle.md/", self.url)
     pure_html = await self.load_web_site()
+    
     self._progress("Downloading website...")
     
     if not pure_html:
       return
-        
+
     # --- MARKDOWN ---
     self._progress("Extracting article...")
-    self.md_article, self.author, self.title, self.num_words, self.read_time = await asyncio.to_thread(get_markdown, pure_html)
+    #self.md_article, self.author, self.title, self.num_words, self.read_time = await asyncio.to_thread(get_markdown, pure_html)
+    html = frontmatter.loads(pure_html)
+    metadata = html.metadata
+    self.author = metadata.get("author")
+    self.title = metadata.get("title")
+    self.num_words = metadata.get("word_count")
+    self.read_time = self.num_words // WPM
+    self.site = metadata.get("site")
+    self.languague = metadata.get("language")
+    self.md_article = html.content
 
     # --- REGEX --- 
     if self.custom_regex and RULES_REGEX:
@@ -737,8 +757,8 @@ class ArticleBuilder:
     self.md_article = await self.handle_images(brackets, urls)
     
     # --- RESOURCES ---
-    self.resources = await catch_resources(self.md_article, self.httpx_c)
-    self.md_article =remove_md_links(self.md_article)
+    self.resources = await save_sources(self.md_article, self.httpx_c)
+    self.md_article = remove_md_links(self.md_article)
     
     # --- PDFS ---
     if self.pdfs:
@@ -748,12 +768,12 @@ class ArticleBuilder:
     # --- TEMPLATE ---
     self._progress("Building template...")
     article_params = (
-      self.creation_date, self.author, self.num_words, self.read_time,
+      self.title, self.creation_date, self.author, self.num_words, self.read_time,
       self.md_article, self.url, format_tags(self.tags),
-      self.audio_file, self.pdf_files, self.resources
+      self.audio_file, self.pdf_files, self.resources, self.site, self.language
     )
     note_templated = build_template(*article_params)
-    
+
     # --- SAVE ARTICLE ---
     self._progress("Saving file...")
     save_to_file(sanitize_text(self.title), note_templated)
@@ -766,8 +786,8 @@ class ArticleBuilder:
   # :::::::::: CLASS - LOAD WEB PAGE ::::::::::
   @logger.catch
   async def load_web_site(self) -> str | None:
-    response = await self.httpx_c.get(self.url, follow_redirects=True)
-    return response.text if response.status_code == 200 else None
+    response = await self.httpx_c.get(self.url_defuddle, follow_redirects=True)
+    return response.content.decode('utf-8', errors='replace') if response.status_code == 200 else None
   # ====================================
 
 
@@ -795,23 +815,25 @@ class ArticleBuilder:
     translated_article = text
     
     for original_chunk, translated_chunk in translated_map.items():
-      fixed_brackets = translated_chunk.replace("] (", "](")
-      translated_chunk = fixed_brackets.replace("�", "")
+      translated_chunk = translated_chunk.replace("] (", "](")
       translated_article = re.sub(re.escape(original_chunk), translated_chunk, translated_article, count=1)
   
     return translated_article
   # ====================================
 
 
-  # ::::::::::: CLASS - HANDLE IMAGES ::::::::::
+  # :::::::::: CLASS - HANDLE IMAGES ::::::::::
   @logger.catch
   async def handle_images(self, brackets: list, urls: list) -> str:
     # --- get type ---
     type_tasks = [get_url_content_type(url, self.httpx_c, extension="image") for url in urls]
-    files_type = await asyncio.gather(*type_tasks, return_exceptions=True)
+    urls_ext = await asyncio.gather(*type_tasks, return_exceptions=True)
 
     # --- filter valid images ---
-    valid_imgs: list[tuple] = [(bracket, url) for bracket, url, ext in list(zip(brackets, urls, files_type)) if ext and "image" in ext]
+    grouped = list(zip(brackets, urls, urls_ext))
+    #valid_imgs: list[tuple] = [(bracket, url) for bracket, url, ext in grouped if ext and "image" in ext]
+    grouped = list(zip(brackets, urls_ext))
+    valid_imgs = [(bracket, url) for bracket, url in grouped if url]
 
     if not valid_imgs:
       return self.md_article
@@ -834,7 +856,7 @@ class ArticleBuilder:
           self.md_article = self.md_article.replace(ext_img, "", count - 1)
       
       md5_local = f"![[{local_img}]]"
-      self.md_article = self.md_article.replace(ext_img, md5_local, 1)  # 
+      self.md_article = self.md_article.replace(ext_img, md5_local, 1)
 
     return self.md_article
   # ====================================
