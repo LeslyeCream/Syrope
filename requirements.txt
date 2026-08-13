@@ -11,4 +11,5 @@ PyYAML==6.0.3
 questionary==2.1.1
 rich==15.0.0
 validators==0.35.0
+markdown>=3.3.3
 -e git+https://github.com/kostyachum/python-markdown-plain-text.git#egg=plain-text-markdown-extention
