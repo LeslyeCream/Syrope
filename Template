@@ -3,7 +3,11 @@ Created: %CREATIONDATE
 Read Time: %READTIME minutes
 Author: %AUTHOR 
 Words: %WORDS 
-Tags: %TAGS
+Tags: %TAGS 
+Sources: %RESOURCES 
+Site: %SITE 
+Language: %LANGUAGE 
+Published: %PUBLISHED
 ---
 
 %AUDIO
