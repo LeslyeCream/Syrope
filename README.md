@@ -6,16 +6,15 @@
 
 ## Features
 
-- Automatically extracts the main content from any webpage
-- Converts web articles to clean Markdown files
-- Maintains formatting, images, links, and structure
-- Automatically generates audio versions of articles (Uses Microsoft Edge's TTS)
-- Translates articles (Uses Cloudfare AI for translations)
-- Downloads and embeds images from the article. Saves them locally
+- Automatically extracts the main content from any webpage using [Defuddle](https://github.com/kepano/defuddle)
+- Automatically generates audio versions of articles (Uses Microsoft Edge's TTS) in your own language
+- Translates articles ([LibreTranslate](https://docs.libretranslate.com/) API or Cloudfare AI) On Android, translations are made using Firefox models thanks to [Offline Translator](https://github.com/DavidVentura/offline-translator)
+- Downloads and embeds images from the article.
 - Add custom tags to articles
-- Add metadata (reading time, word count, creation date, author)
+- Add metadata (reading time, word count, creation date, author, etc)
 - Automatically finds and download PDF papers cited in articles
 - Apply custom regex patterns to clean up content
+- Save sources mentioned in the articles
 
 ---
 
@@ -29,6 +28,8 @@
 2. Efficiency in data usage and download size
 
 - Load a website in your browser and save it with the Obsidian extension can use up dozens of megabytes, since it always loads the entire site. This script prevents that and lets you save more websites in less time while using less data. It’s especially useful if you’re on a limited mobile data plan or a slow network.
+
+*If you're looking to archive a large number of articles to prevent loss or if you're a bookworm, I think this script can be very helpful (:*
 
 ## How to use
 
@@ -106,6 +107,8 @@ Read Time: %READTIME minutes
 Author: %AUTHOR 
 Words: %WORDS 
 Tags: %TAGS
+Site: %SITE
+Language: %LANGUAGE
 ---
 
 %AUDIO
@@ -133,7 +136,7 @@ Tags: %TAGS
 python Syrope.py [URL] [OPTIONS]
 
 Options:
-  -l, --labels LABELS       Add tags to the article (comma-separated)
+  -l, --labels LABELS        Add tags to the article (comma-separated)
   -t, --translate            Translate article to your default language
   -v, --voice                Generate audio version
   -r, --regex                Apply custom regex rules
@@ -156,7 +159,7 @@ OTHERS:
   FOREIGN_LANGUAGES:                   #List of languages to detect (to avoid loading them all) 
     - ita
     - fr
-
+  TRANSLATE_HOST                       # Direction and port of the LibreTranslate API
   DATETIME_FORMAT: "%Y-%m-%d %H:%M"    # Date format in your notes
   DEFAULT_LANGUAGE: "en"               # Language into which the articles will be translated
   REQUEST_TIMEOUT: 10                  # Seconds to wait for load websites
@@ -171,6 +174,7 @@ PARAM_DEFAULTS:
   translate: false                     # Default: don't translate
   labels: null                         # Default: no tags
   regex: false                         # Default: don't apply custom regex
+  pdfs: true                           # Default: Download PDFs mentioned in the articles
 
 API:
   API_KEY : 'API_KEY_HERE'             # Cloudflare API Key
