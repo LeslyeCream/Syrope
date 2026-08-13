@@ -6,6 +6,7 @@ OTHERS:
   TRANSLATE_LANGUAGES: 
    - es
    - en
+  TRANSLATE_HOST: 'http://127.0.0.1:7777/translate'
   USERAGENT: 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Mobile Safari/537.36'
   DEL_SYNCED_ARTICLES: False
   DATETIME_FORMAT: '%Y-%m-%d %H:%M'
