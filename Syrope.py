@@ -24,6 +24,7 @@ from pydefuddle import defuddle
 from readability import Document
 from rich.console import Console
 from rich.traceback import install
+from datetime import datetime, timezone
 from markdownify import markdownify as md
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from markdown_plain_text.extention import convert_to_plain_text
@@ -69,6 +70,7 @@ WPM = settings["OTHERS"]["WPM"]
 DEL_SYNCED_ARTICLES = settings["OTHERS"]["DEL_SYNCED_ARTICLES"]
 USERAGENT = settings["OTHERS"]["USERAGENT"]
 TTS_VOICE = settings["OTHERS"]["TTS_VOICE"]
+TRANSLATE_HOST = settings["OTHERS"]["TRANSLATE_HOST"]
 
 # --- PARAM DEFAULTS ----
 PARAM_DEFAULTS = settings["PARAM_DEFAULTS"]
@@ -341,11 +343,10 @@ def sanitize_text(text: str) -> str:
 
 # :::::::::: LOCAL TRANSLATE ::::::::::
 async def local_translate(text: str, in_language: str, httpx_c: httpx.Client) -> str:
-  url = "http://127.0.0.1:7777/translate" 
   body = {"q": text, "source": in_language, "target": DEFAULT_LANGUAGE.lower()}
   
   try:
-    response = await httpx_c.post(url, json=body, timeout=30)
+    response = await httpx_c.post(TRANSLATE_HOST, json=body, timeout=30)
     response.encoding = 'utf-8'
     return response.json()["translatedText"].strip() if response.status_code == 200 else text
   
@@ -414,7 +415,7 @@ def format_tags(tags: str) -> str | None:
 
 # :::::::::: BUILD TEMPLATE ::::::::::
 def build_template(*args) -> str:
-  title, creation_date, author, num_words, read_time, full_article, url, tags, audio, pdf_files, resources, site, language = args
+  title, creation_date, author, num_words, read_time, full_article, url, tags, audio, pdf_files, resources, site, language, published = args
   
   metadata = {
     "%CREATIONDATE": creation_date,
@@ -428,11 +429,11 @@ def build_template(*args) -> str:
     "%PDF": pdf_files,
     "%RESOURCES": f"'[[{resources}|{sanitize_text(title)}]]'",
     "%SITE": site,
-    "%LANGUAGE": language
+    "%LANGUAGE": language,
+    "%PUBLISHED": published
   }
 
   missing_values = [key for key, value in metadata.items() if not value]
-  print(missing_values)
   
   with open(TEMPLATE, "r", encoding="utf-8") as f:
     template = f.read()
@@ -460,7 +461,7 @@ def del_unused_yaml(text: str, properties: Iterator[str]):
 
 
 # :::::::::: DELETE / MOVE JSON FINISHED ::::::::::
-def delete_json(json_path: Path) -> None:
+def del_synced_file(json_path: Path) -> None:
   done_path = ARTICLES_SYNCED_DIR.joinpath(json_path.name)
   json_path.unlink(missing_ok=True) if DEL_SYNCED_ARTICLES else json_path.rename(done_path)
 # ====================================
@@ -731,6 +732,7 @@ class ArticleBuilder:
     self.read_time = self.num_words // WPM
     self.site = metadata.get("site")
     self.languague = metadata.get("language")
+    self.published = metadata.get("published")
     self.md_article = html.content
 
     # --- REGEX --- 
@@ -770,19 +772,33 @@ class ArticleBuilder:
 
     # --- TEMPLATE ---
     self._progress("Building template...")
+    self.tags = format_tags(self.tags)
+    
     article_params = (
-      self.title, self.creation_date, self.author, self.num_words, self.read_time,
-      self.md_article, self.url, format_tags(self.tags),
-      self.audio_file, self.pdf_files, self.resources, self.site, self.language
+      self.title, 
+      self.creation_date, 
+      self.author, 
+      self.num_words, 
+      self.read_time,
+      self.md_article, 
+      self.url, 
+      self.tags,
+      self.audio_file, 
+      self.pdf_files, 
+      self.resources, 
+      self.site, 
+      self.language, 
+      self.published
     )
+    
     note_templated = build_template(*article_params)
 
     # --- SAVE ARTICLE ---
     self._progress("Saving file...")
     save_to_file(sanitize_text(self.title), note_templated)
     
-    # --- DELETE JSON ---
-    #delete_json(self.json_file)
+    # --- DELETE SYNCED FILE ---
+    del_synced_file(self.json_file)
     self.progress_bar.update(self.task_id, completed=100)
 
 
@@ -896,18 +912,6 @@ class ArticleBuilder:
     stylized_sublist = header + "".join(pdf_sublist)
 
     return stylized_sublist
-
-
-  # :::::::::: CLASS - BUILD NOTE ::::::::::
-  # --- Build Note ----
-  def build_note(self) -> str:
-    article_params = (
-      self.creation_date, self.author, self.num_words, self.read_time,
-      self.md_article, self.url, format_tags(self.tags),
-      self.audio_file, self.pdf_files, self.resources
-    )
-    
-    return build_template(*article_params)
 # ====================================
 
 
