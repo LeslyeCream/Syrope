@@ -90,6 +90,11 @@ git clone https://github.com/yourusername/Syrope.git && cd Syrope
 ```bash
 pip install -r requirements.txt
 ```
+*On Android, it may be necessary to install:*
+
+```bash
+pkg install python-numpy && pip install git+https://github.com/kostyachum/python-markdown-plain-text.git
+```
 
 3. **Set up the configuration file**
 Edit `Settings.yaml`with your own custom settings
