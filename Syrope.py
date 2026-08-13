@@ -265,7 +265,7 @@ def save_changes_on_file(params: dict) -> None:
 # :::::::::: GET WEB PAGE ::::::::::
 @logger.catch
 async def load_web_site(url: str, httpx_c: httpx.Client) -> str | None:
-  response = await httpx_c.get(url, follow_redirects=True)
+  response = await httpx_c.get(url, headers=USER_AGENT, follow_redirects=True)
   return response.text if response.status_code == 200 else None
 # ====================================
 
@@ -407,7 +407,8 @@ def save_to_file(name_file: str, content: str) -> None:
 # :::::::::: FORMAT TAGS ::::::::::
 def format_tags(tags: str) -> str | None:
   x_tags = tags.split(",")
-  return "\n" + "".join(f"  - {i}\n" for i in x_tags) if not tags else None
+  listed_tags = "\n" + "".join(f"  - {tag}\n" for tag in x_tags)
+  return listed_tags if tags else None
 # ====================================
 
 
@@ -431,6 +432,8 @@ def build_template(*args) -> str:
   }
 
   missing_values = [key for key, value in metadata.items() if not value]
+  print(missing_values)
+  
   with open(TEMPLATE, "r", encoding="utf-8") as f:
     template = f.read()
   
@@ -448,7 +451,7 @@ def build_template(*args) -> str:
 # :::::::::: DEL UNUSED PROPERTIES ::::::::::
 def del_unused_yaml(text: str, properties: Iterator[str]):
   props_to_del = "|".join(properties)
-
+  print(props_to_del)
   valid_lines = [line for line in text.split("\n") if not re.search(props_to_del, line)]
   cleaned_txt = '\n'.join(valid_lines)
   
@@ -705,8 +708,8 @@ class ArticleBuilder:
   def _progress(self, desc: str, advance: int = 10) -> None:
     self.progress_bar.update(self.task_id, advance=advance, description=f"[cyan]{desc}[/cyan]")
 
-  # --- RUN ---
-  async def run(self) -> None:
+  # --- Main ---
+  async def main(self) -> None:
     
     # --- LOAD PAGE ---
     self.url_defuddle = re.sub(r"^https\:\/\/", "https://defuddle.md/", self.url)
@@ -779,7 +782,7 @@ class ArticleBuilder:
     save_to_file(sanitize_text(self.title), note_templated)
     
     # --- DELETE JSON ---
-    delete_json(self.json_file)
+    #delete_json(self.json_file)
     self.progress_bar.update(self.task_id, completed=100)
 
 
@@ -915,7 +918,7 @@ async def run_sync(json_data: dict, json_file: str, semaphore, progress_bar, htt
       
       task_id = progress_bar.add_task("Starting...", total=100, filename=json_data["url"])
       processor = ArticleBuilder(json_data, json_file, httpx_c, progress_bar, task_id)
-      await processor.run()
+      await processor.main()
       progress_bar.update(task_id, completed=100, description="[green]✓ Done[/green]")
     
     except Exception as e:
@@ -950,5 +953,4 @@ async def handle_sync() -> None:
 
 if __name__ == "__main__":
   main_cli()
-  
   
