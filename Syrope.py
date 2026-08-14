@@ -21,11 +21,9 @@ from loguru import logger
 import py3langid as langid
 from rich.table import Table
 from pydefuddle import defuddle
-from readability import Document
 from rich.console import Console
 from rich.traceback import install
 from datetime import datetime, timezone
-from markdownify import markdownify as md
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from markdown_plain_text.extention import convert_to_plain_text
 
@@ -210,7 +208,7 @@ def save_multiples_url(input_file: str, params: dict) -> None:
   # --- Load urls from file ---
   with open(input_file, "r", encoding="utf-8") as f:
     content = f.readlines()
-    valid_urls = [remove_tracking(url.strip()) for url in content if validators.url(url.strip())]
+    valid_urls = [url.strip() for url in content if validators.url(url.strip())]
 
   # --- Save each url ---
   for url in valid_urls:
@@ -234,7 +232,7 @@ def save_single_url(url: str, params: dict) -> None:
   creation_date = {"creation_date": dt.now().strftime("%Y-%m-%d %H:%M")}
   params = params.copy()
   params.update(creation_date)
-  params["url"] = remove_tracking(url)
+  params["url"] = url
   save_changes_on_file(params)
   
   show_message("Url saved!")
@@ -351,7 +349,7 @@ async def local_translate(text: str, in_language: str, httpx_c: httpx.Client) ->
     return response.json()["translatedText"].strip() if response.status_code == 200 else text
   
   except Exception:
-    logger.exception("Error translating text")
+    #logger.exception("Error translating text")
     return text
 # ====================================
 
@@ -452,7 +450,6 @@ def build_template(*args) -> str:
 # :::::::::: DEL UNUSED PROPERTIES ::::::::::
 def del_unused_yaml(text: str, properties: Iterator[str]):
   props_to_del = "|".join(properties)
-  print(props_to_del)
   valid_lines = [line for line in text.split("\n") if not re.search(props_to_del, line)]
   cleaned_txt = '\n'.join(valid_lines)
   
@@ -520,24 +517,6 @@ async def get_file_bytes(url: str, httpx_c: httpx.Client) -> tuple | None:
   return (type_file, url) if response.status_code == 206 else None
 # ====================================
 
-"""
-# :::::::::: MARKDOWN AND METADATA ::::::::::
-def get_markdown(pure_html: str) -> tuple:
-  readbility_obj = Document(pure_html)
-  
-  md_article = md(readbility_obj.summary(keep_all_images=True))
-
-  author = sanitize_text(readbility_obj.author()) if not readbility_obj.author().startswith("[") else None
-  
-  title = sanitize_text(readbility_obj.title())
-
-  num_words = len(md_article.split())
-  
-  read_time = num_words // WPM
-  
-  return md_article, author, title, num_words, read_time
-# ====================================
-"""
 
 # :::::::::: CATCH MARKDOWN PARAGRAPHS (WTF WITH THESE FUNCTIONS 💀😭) ::::::::::
 def catch_md_paragraphs(children):
@@ -673,6 +652,20 @@ def remove_md_links(md_article):
 # ====================================
 
 
+# ::::: GET REAL SUBSTACK URL :::::
+def substack_fix(url: str) -> str:
+  if not re.match(r"https\:\/+open", url):
+    return url
+  
+  username_regex = r"(?<=pub\/).+(?=\/p)"
+  user_match = re.search(username_regex, url)
+  cleaned_url = re.sub(r"\/pub\/.+(?=\/p)", "", url)
+  replaced_username = re.sub(r"open", user_match.group(0), cleaned_url)
+  
+  return replaced_username
+# ====================================
+
+
 # :::::::::: MAIN CLASS (First attempt) ::::::::::
 class ArticleBuilder:
   def __init__(self, json_data: dict, json_file: Path, httpx_c: httpx.Client, progress_bar, task_id):
@@ -712,18 +705,20 @@ class ArticleBuilder:
   # --- Main ---
   async def main(self) -> None:
     
+    # --- SUBSTACK FIX ---
+    self.url = substack_fix(self.url) if "https://open.substack" in self.url else self.url
+    self.url = remove_tracking(self.url)
+    
     # --- LOAD PAGE ---
+    self._progress("Downloading website...")
     self.url_defuddle = re.sub(r"^https\:\/\/", "https://defuddle.md/", self.url)
     pure_html = await self.load_web_site()
-    
-    self._progress("Downloading website...")
     
     if not pure_html:
       return
 
     # --- MARKDOWN ---
     self._progress("Extracting article...")
-    #self.md_article, self.author, self.title, self.num_words, self.read_time = await asyncio.to_thread(get_markdown, pure_html)
     html = frontmatter.loads(pure_html)
     metadata = html.metadata
     self.author = metadata.get("author")
@@ -850,7 +845,6 @@ class ArticleBuilder:
 
     # --- filter valid images ---
     grouped = list(zip(brackets, urls, urls_ext))
-    #valid_imgs: list[tuple] = [(bracket, url) for bracket, url, ext in grouped if ext and "image" in ext]
     grouped = list(zip(brackets, urls_ext))
     valid_imgs = [(bracket, url) for bracket, url in grouped if url]
 
