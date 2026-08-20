@@ -242,7 +242,7 @@ def save_single_url(url: str, params: dict) -> None:
 # ::::::::::REMOVE TRACKING PARAMETERS ::::::::::
 def remove_tracking(url: str) -> str:
   try:
-    cleaned_url = re.sub(r"utm.+", "", url)
+    cleaned_url = re.sub(r"\?.*", "", url)
     return cleaned_url
   except Exception:
     return url
@@ -259,14 +259,6 @@ def save_changes_on_file(params: dict) -> None:
   
     with open(full_path, "w", encoding="utf-8") as f:
       json.dump(params, f, ensure_ascii=False, indent=4)
-# ====================================
-
-
-# :::::::::: GET WEB PAGE ::::::::::
-@logger.catch
-async def load_web_site(url: str, httpx_c: httpx.Client) -> str | None:
-  response = await httpx_c.get(url, headers=USER_AGENT, follow_redirects=True)
-  return response.text if response.status_code == 200 else None
 # ====================================
 
 
@@ -666,6 +658,16 @@ def substack_fix(url: str) -> str:
 # ====================================
 
 
+# ::::: FORMAT DATE :::::
+def format_published_date(input_date):
+  in_date = str(input_date)
+  if not in_date:
+    return input_date
+  date = input_date.strftime("%Y-%m-%d %H:%M")
+  return date if date else input_date
+# ====================================
+
+
 # :::::::::: MAIN CLASS (First attempt) ::::::::::
 class ArticleBuilder:
   def __init__(self, json_data: dict, json_file: Path, httpx_c: httpx.Client, progress_bar, task_id):
@@ -705,13 +707,13 @@ class ArticleBuilder:
   # --- Main ---
   async def main(self) -> None:
     
+    self.url = remove_tracking(self.url)
+
     # --- SUBSTACK FIX ---
     self.url = substack_fix(self.url) if "https://open.substack" in self.url else self.url
-    self.url = remove_tracking(self.url)
     
     # --- LOAD PAGE ---
     self._progress("Downloading website...")
-    self.url_defuddle = re.sub(r"^https\:\/\/", "https://defuddle.md/", self.url)
     pure_html = await self.load_web_site()
     
     if not pure_html:
@@ -724,7 +726,7 @@ class ArticleBuilder:
     self.author = metadata.get("author")
     self.title = metadata.get("title")
     self.num_words = metadata.get("word_count")
-    self.read_time = self.num_words // WPM
+    self.read_time = self.num_words // WPM if self.num_words else None
     self.site = metadata.get("site")
     self.languague = metadata.get("language")
     self.published = metadata.get("published")
@@ -736,11 +738,15 @@ class ArticleBuilder:
       self.md_article = apply_custom_regex(self.md_article)
 
     # --- TRANSLATE ---
-    article_lang = langid.classify(self.title)[0]
-    if self.translation and article_lang.upper() != DEFAULT_LANGUAGE:
-      self._progress("Translating...")
-      self.title = sanitize_text(await local_translate(self.title, article_lang, self.httpx_c))
-      self.md_article = await self.handle_translate(self.md_article, article_lang)
+    try:
+      article_lang = langid.classify(self.title)[0]
+      if self.translation and article_lang.upper() != DEFAULT_LANGUAGE:
+        self._progress("Translating...")
+        self.title = sanitize_text(await local_translate(self.title, article_lang, self.httpx_c))
+        self.md_article = await self.handle_translate(self.md_article, article_lang)
+    
+    except Exception:
+      pass
     
     # --- AUDIO NOTE --- 
     if self.voice and self.read_time < READING_THRESHOLD:
@@ -767,7 +773,9 @@ class ArticleBuilder:
 
     # --- TEMPLATE ---
     self._progress("Building template...")
+    self.title = sanitize_text(self.title)
     self.tags = format_tags(self.tags)
+    self.published = format_published_date(self.published)
     
     article_params = (
       self.title, 
@@ -790,7 +798,7 @@ class ArticleBuilder:
 
     # --- SAVE ARTICLE ---
     self._progress("Saving file...")
-    save_to_file(sanitize_text(self.title), note_templated)
+    save_to_file(self.title, note_templated)
     
     # --- DELETE SYNCED FILE ---
     del_synced_file(self.json_file)
@@ -800,7 +808,8 @@ class ArticleBuilder:
   # :::::::::: CLASS - LOAD WEB PAGE ::::::::::
   @logger.catch
   async def load_web_site(self) -> str | None:
-    response = await self.httpx_c.get(self.url_defuddle, follow_redirects=True)
+    defuddle_url = re.sub(r"^https:\/\/", "https://defuddle.md/", self.url) or self.url
+    response = await self.httpx_c.get(defuddle_url, follow_redirects=True)
     return response.content.decode('utf-8', errors='replace') if response.status_code == 200 else None
   # ====================================
 
