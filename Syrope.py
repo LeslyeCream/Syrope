@@ -869,8 +869,9 @@ class ArticleBuilder:
     # ---- remove duplicates ---
     done = set()
     for ext_img, _, local_img in mapping:
-      if ext_img in done:
+      if ext_img in done or local_img is None:
         continue
+      
       done.add(ext_img)
       count = self.md_article.count(ext_img)
       
