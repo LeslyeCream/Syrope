@@ -36,7 +36,7 @@ from markdown_plain_text.extention import convert_to_plain_text
 # ✔️ Check settings / paths
 # Handle errors
 # ✔️ Tags function
-# Replace build_template to kwargs(?())
+# Replace build_template to kwargs(?)
 # ✔️ Add detailed information during sync
 # ✔️ Only create audio if the article length is < n
 # ✔️ Using a class in main
@@ -463,7 +463,6 @@ def show_message(msg: str, custom_style="Bold") -> None:
 
 
 # :::::::::: MICROSOFT EDGE TTS ::::::::::
-@logger.catch
 def text_to_voice(text: str, name_file: str) -> None:
   output_audio_file = ATTACHMENTS_DIR.joinpath(f"{name_file}.mp3")
   communicate = edge_tts.Communicate(text, TTS_VOICE)
@@ -472,7 +471,6 @@ def text_to_voice(text: str, name_file: str) -> None:
 
 
 # :::::::::: GET PDFS ::::::::::
-@logger.catch
 async def get_pdfs(md_article: str, httpx_c: httpx.Client) -> str | None:
   # --- Find all urls ---
   all_urls = re.findall(URL_REGEX, md_article, re.MULTILINE)
@@ -502,7 +500,7 @@ async def get_pdfs(md_article: str, httpx_c: httpx.Client) -> str | None:
 
 
 # :::::::::: GET FILE TYPE ::::::::::
-@logger.catch
+
 async def get_file_bytes(url: str, httpx_c: httpx.Client) -> tuple | None:
   response = await httpx_c.get(url, headers={"Range": "bytes=0-32"}, follow_redirects=True)
   type_file = response.content
@@ -610,16 +608,19 @@ def catch_paragraphs(nodes, excluded=False):
 # ====================================
 
 # ::::::::::SAVE RESOURCES ::::::::::
-@logger.catch
 async def save_sources(md_article: str, httpx_c) -> list | str:
   regex_brackets = r"[!\\[].*\)"
   brackets = re.findall(regex_brackets, md_article, re.MULTILINE)
-
+  website_urls = []
+  
   if brackets:
     urls_regex = r"http[^)]*(?=\))"
     website_urls = [remove_tracking(url_match.group(0)) for url in brackets if (url_match := re.search(urls_regex, url))]
 
   # --- get type ---
+  if not website_urls:
+    return None
+
   type_tasks = [get_url_content_type(url, httpx_c) for url in website_urls]
   content_type = await asyncio.gather(*type_tasks, return_exceptions=True)
 
@@ -662,9 +663,10 @@ def substack_fix(url: str) -> str:
 def format_published_date(input_date):
   in_date = str(input_date)
   if not in_date:
-    return input_date
-  date = input_date.strftime("%Y-%m-%d %H:%M")
-  return date if date else input_date
+    return None
+  
+  match_date = re.sub(r"^(\d+-\d+-\d+)(T|\s+)(\d+:\d+).*", r"\1 \3", in_date).strip() 
+  return match_date if match_date else None
 # ====================================
 
 
@@ -943,14 +945,14 @@ async def handle_sync() -> None:
     show_message("Nothing to sync")
     return
   
-  semaphore = asyncio.Semaphore(4)
+  semaphore = asyncio.Semaphore(2)
   
   custom_bar = r"{task.percentage}% - {task.description} ([yellow]{task.fields[filename]}[/yellow])"
   
   try:
     
-    with Progress(SpinnerColumn(), TextColumn(custom_bar), refresh_per_second=15) as progress_bar:
-      async with httpx.AsyncClient(headers={"User-Agent": USERAGENT}) as httpx_c:
+    with Progress(SpinnerColumn(), TextColumn(custom_bar), refresh_per_second=30) as progress_bar:
+      async with httpx.AsyncClient(headers={"User-Agent":USER_AGENT}) as httpx_c:
         await asyncio.gather(*(run_sync(json_data[0], json_data[1], semaphore, progress_bar, httpx_c) for json_data in articles_json), return_exceptions=True)
         console.print("[bold green]✓ Sync Finished[/bold green]")
   
