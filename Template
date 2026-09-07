@@ -1,8 +1,8 @@
 ---
-Created: %CREATIONDATE
-Read Time: %READTIME minutes
+Created: %CREATION_DATE
+Read Time: %READ_TIME minutes
 Author: %AUTHOR 
-Words: %WORDS 
+Words: %NUM_WORDS 
 Tags: %TAGS 
 Sources: %RESOURCES 
 Site: %SITE 
