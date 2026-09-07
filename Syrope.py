@@ -36,7 +36,7 @@ from markdown_plain_text.extention import convert_to_plain_text
 # ✔️ Check settings / paths
 # Handle errors
 # ✔️ Tags function
-# Replace build_template to kwargs(?)
+# ✔️Replace build_template to kwargs(?)
 # ✔️ Add detailed information during sync
 # ✔️ Only create audio if the article length is < n
 # ✔️ Using a class in main
@@ -217,7 +217,7 @@ def save_multiples_url(input_file: str, params: dict) -> None:
     unique_params.update(creation_date)
     unique_params["url"] = url
     # del unique_params["input_file"]
-    save_changes_on_file(unique_params)
+    save_json_data(unique_params)
   
   show_message(f"{len(valid_urls)} urls saved!")
 # ====================================
@@ -233,7 +233,7 @@ def save_single_url(url: str, params: dict) -> None:
   params = params.copy()
   params.update(creation_date)
   params["url"] = url
-  save_changes_on_file(params)
+  save_json_data(params)
   
   show_message("Url saved!")
 # ====================================
@@ -250,20 +250,22 @@ def remove_tracking(url: str) -> str:
 
 
 # :::::::::: SAVE PARAMETERS IN JSON ::::::::::
-def save_changes_on_file(params: dict) -> None:
-  if validators.url(params.get("url")):
-
-    url = params.get("url").encode("utf-8")
-    json_name = get_hash(url)
-    full_path = OFFLINE_DIR.joinpath(f"{json_name}.json")
+def save_json_data(params: dict) -> None:
+  url = params.get("url")
   
-    with open(full_path, "w", encoding="utf-8") as f:
-      json.dump(params, f, ensure_ascii=False, indent=4)
+  if url is None or not validators.url(url):
+    return None
+  
+  json_name = get_checksum(url.encode("utf-8"))
+  full_path = OFFLINE_DIR.joinpath(f"{json_name}.json")
+  
+  with open(full_path, "w", encoding="utf-8") as f:
+    json.dump(params, f, ensure_ascii=False, indent=4)
 # ====================================
 
 
 # :::::::::: GET HASH MD5 ::::::::::
-def get_hash(text: bytes) -> str:
+def get_checksum(text: bytes) -> str:
   return hashlib.md5(text).hexdigest()
 # ====================================
 
@@ -281,7 +283,7 @@ async def download_files(url: str, httpx_c: httpx.Client) -> str:
 
     # --- Get info image ---
     file_extension = "." + content_type.split(";")[0].split("/")[1]
-    md5_filename = get_hash(file_obj) + file_extension
+    md5_filename = get_checksum(file_obj) + file_extension
     dst_path = ATTACHMENTS_DIR.joinpath(md5_filename)
       
     # --- Save image ---
@@ -296,8 +298,7 @@ async def download_files(url: str, httpx_c: httpx.Client) -> str:
 
 
 # :::::::::: CONTENT TYPE ::::::::::
-logger.catch(reraise=False)
-async def get_url_content_type(url: str, httpx_c: httpx.Client, extension="text") -> str | None:
+async def check_content_type(url: str, httpx_c: httpx.Client, extension="text") -> str | None:
   response = await httpx_c.head(url, follow_redirects=True)
   
   if response.status_code != 200: 
@@ -310,7 +311,7 @@ async def get_url_content_type(url: str, httpx_c: httpx.Client, extension="text"
 
 
 # :::::::::: CATCH BRACKETS ::::::::::
-def catch_brackets(md_article: str) -> list | None:
+def catch_brackets(md_article: str) -> list:
   regex_brackets = r"^[!\\[].*\)$"
   return brackets if (brackets := re.findall(regex_brackets, md_article, re.MULTILINE)) else []
 # ====================================
@@ -397,55 +398,64 @@ def save_to_file(name_file: str, content: str) -> None:
 
 # :::::::::: FORMAT TAGS ::::::::::
 def format_tags(tags: str) -> str | None:
-  x_tags = tags.split(",")
-  listed_tags = "\n" + "".join(f"  - {tag}\n" for tag in x_tags)
-  return listed_tags if tags else None
+  if not tags:
+    return None
+  
+  split_tags = tags.split(",")
+  valid_tags = [tag.strip() for tag in split_tags if tag.strip()]
+
+  if not valid_tags:
+    return None
+  
+  formatted_tags = "\n" + "".join(f" - {tag}\n" for tag in valid_tags)
+  return formatted_tags
 # ====================================
 
 
 # :::::::::: BUILD TEMPLATE ::::::::::
-def build_template(*args) -> str:
-  title, creation_date, author, num_words, read_time, full_article, url, tags, audio, pdf_files, resources, site, language, published = args
+def build_template(**kwargs) -> str:
+  required_fields = [
+    "%TITLE",
+    "%CREATION_DATE",
+    "%AUTHOR",
+    "%NUM_WORDS",
+    "%READ_TIME",
+    "%ARTICLE",
+    "%URL",
+    "%TAGS",
+    "%AUDIO",
+    "%PDF",
+    "%RESOURCES",
+    "%SITE",
+    "%LANGUAGE",
+    "%PUBLISHED"
+  ]
   
-  metadata = {
-    "%CREATIONDATE": creation_date,
-    "%AUTHOR": author,
-    "%WORDS": num_words,
-    "%READTIME": read_time,
-    "%ARTICLE": full_article,
-    "%URL": url,
-    "%TAGS": tags,
-    "%AUDIO": audio,
-    "%PDF": pdf_files,
-    "%RESOURCES": f"'[[{resources}|{sanitize_text(title)}]]'",
-    "%SITE": site,
-    "%LANGUAGE": language,
-    "%PUBLISHED": published
-  }
-
-  missing_values = [key for key, value in metadata.items() if not value]
+  missing_values = [key for key in required_fields if kwargs.get(key) is None or kwargs.get(key) == ""]
   
   with open(TEMPLATE, "r", encoding="utf-8") as f:
     template = f.read()
   
+  # --- Declutter Template ---
   if missing_values:
-    template = del_unused_yaml(template, missing_values)
-  
-  for var, value in filter(lambda item: item[0] not in missing_values, metadata.items()):
-    if var in template:
-      template = template.replace(str(var), str(value))
+    for key in missing_values:
+      kwargs.pop(key, None)
+
+    yaml_to_del = "|".join(missing_values)
+    valid_lines = [line for line in template.split("\n") if not re.search(yaml_to_del, line)]
+    template = '\n'.join(valid_lines)
+
+  # --- Build Template ---
+  if kwargs.get("%RESOURCES") and kwargs.get("%TITLE"):
+    resources = kwargs.get("%RESOURCES")
+    title = sanitize_text(kwargs.get("%TITLE"))
+    kwargs["%RESOURCES"] = f"'[[{resources} | {title}]]'"
+    
+  for variable, value in kwargs.items():
+    if variable in template:
+      template = template.replace(str(variable), str(value))
 
   return template
-# ====================================
-
-
-# :::::::::: DEL UNUSED PROPERTIES ::::::::::
-def del_unused_yaml(text: str, properties: Iterator[str]):
-  props_to_del = "|".join(properties)
-  valid_lines = [line for line in text.split("\n") if not re.search(props_to_del, line)]
-  cleaned_txt = '\n'.join(valid_lines)
-  
-  return cleaned_txt
 # ====================================
 
 
@@ -621,7 +631,7 @@ async def save_sources(md_article: str, httpx_c) -> list | str:
   if not website_urls:
     return None
 
-  type_tasks = [get_url_content_type(url, httpx_c) for url in website_urls]
+  type_tasks = [check_content_type(url, httpx_c) for url in website_urls]
   content_type = await asyncio.gather(*type_tasks, return_exceptions=True)
 
   # --- filter valid custom content ---
@@ -630,7 +640,7 @@ async def save_sources(md_article: str, httpx_c) -> list | str:
   if not valid_content:
     return None
 
-  md5_filename = f"{get_hash(uuid.uuid4().bytes)}.md"
+  md5_filename = f"{get_checksum(uuid.uuid4().bytes)}.md"
   output_path = ATTACHMENTS_DIR / md5_filename
   with open(output_path, "w") as f:
     f.write("".join(f"{link}\n" for link in valid_content))
@@ -670,7 +680,7 @@ def format_published_date(input_date):
 # ====================================
 
 
-# :::::::::: MAIN CLASS (First attempt) ::::::::::
+# :::::::::: MAIN CLASS ::::::::::
 class ArticleBuilder:
   def __init__(self, json_data: dict, json_file: Path, httpx_c: httpx.Client, progress_bar, task_id):
     
@@ -753,7 +763,7 @@ class ArticleBuilder:
     # --- AUDIO NOTE --- 
     if self.voice and self.read_time < READING_THRESHOLD:
       self._progress("Generating audio...")
-      audio_name = get_hash(self.title.encode("utf-8"))
+      audio_name = get_checksum(self.title.encode("utf-8"))
       self.audio_file = f"![[{audio_name}.mp3]]"
       plain_text = convert_to_plain_text(self.md_article)
       await asyncio.to_thread(text_to_voice, plain_text, audio_name)
@@ -779,24 +789,24 @@ class ArticleBuilder:
     self.tags = format_tags(self.tags)
     self.published = format_published_date(self.published)
     
-    article_params = (
-      self.title, 
-      self.creation_date, 
-      self.author, 
-      self.num_words, 
-      self.read_time,
-      self.md_article, 
-      self.url, 
-      self.tags,
-      self.audio_file, 
-      self.pdf_files, 
-      self.resources, 
-      self.site, 
-      self.language, 
-      self.published
-    )
+    article_params = {
+    "%TITLE": self.title,
+    "%CREATION_DATE": self.creation_date,
+    "%AUTHOR": self.author,
+    "%NUM_WORDS": self.num_words,
+    "%READ_TIME": self.read_time,
+    "%ARTICLE": self.md_article,
+    "%URL": self.url,
+    "%TAGS": self.tags,
+    "%AUDIO": self.audio_file,
+    "%PDF": self.pdf_files,
+    "%RESOURCES": self.resources,
+    "%SITE": self.site,
+    "%LANGUAGE": self.language,
+    "%PUBLISHED": self.published,
+    }
     
-    note_templated = build_template(*article_params)
+    note_templated = build_template(**article_params)
 
     # --- SAVE ARTICLE ---
     self._progress("Saving file...")
@@ -851,7 +861,7 @@ class ArticleBuilder:
   @logger.catch
   async def handle_images(self, brackets: list, urls: list) -> str:
     # --- get type ---
-    type_tasks = [get_url_content_type(url, self.httpx_c, extension="image") for url in urls]
+    type_tasks = [check_content_type(url, self.httpx_c, extension="image") for url in urls]
     urls_ext = await asyncio.gather(*type_tasks, return_exceptions=True)
 
     # --- filter valid images ---
