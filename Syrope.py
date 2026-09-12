@@ -80,6 +80,8 @@ API_KEY = settings["API"]["API_KEY"]
 # --- REGEX ---
 RULES_REGEX = settings["REGEX"]
 URL_REGEX = r"https?://(?:www\.)?[-a-zA-Z0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9]{1,6}\b(?:[-a-zA-Z0-9@:%_\+.~#?&/=]*)"
+BRACKETS_REGEX = r"^[!\\[].*\)$"
+BRACKET_IMG_REGEX = r"http[^)]*(?=\))"
 
 # --- LOGS ---
 LOG_FILE = Path(__file__).parent /  "logs.log" 
@@ -145,25 +147,24 @@ def view_saved_articles() -> None:
   json_files = list(OFFLINE_DIR.glob("*.json"))
 
   if not len(json_files):
-    show_message("No items saved")
+    console.print("[bold red] No items saved [/ bold red]")
 
-  else:
-    json_data = [data for json_f in json_files if (data := get_json_data(json_f))]
+  json_data = [data for json_f in json_files if (data := get_json_data(json_f))]
 
-    # --- Build Table ---
-    table = Table(title="Links saved", show_lines=True)
-    table.add_column("Url", style="cyan")
-    table.add_column("Created", style="yellow", justify="center")
-    table.add_column("Attributes", style="green", justify="center")
+  # --- Build Table ---
+  table = Table(title="Links saved", show_lines=True)
+  table.add_column("Url", style="cyan")
+  table.add_column("Created", style="yellow", justify="center")
+  table.add_column("Attributes", style="green", justify="center")
 
-    # --- Get Attributes ---
-    for data in json_data:
-      valid_attr = [k for k, v in data.items() if v and k not in ["url", "sync", "creation_date", "input_file"]]
-      attributes = " - ".join(valid_attr)
+  # --- Get Attributes ---
+  for data in json_data:
+    valid_attr = [k for k, v in data.items() if v and k not in ["url", "sync", "creation_date", "input_file"]]
+    attributes = " - ".join(valid_attr)
 
-      table.add_row(data["url"], str(data["creation_date"]), attributes)
+    table.add_row(data["url"], str(data["creation_date"]), attributes)
 
-    console.print(table)
+  console.print(table)
 # ====================================
 
 
@@ -182,7 +183,8 @@ def main_cli(**kwargs) -> None:
   
   # --- Save urls from file ---
   input_file = params.get("input_file")
-  # --- TUI ---
+  
+  # --- CLI ---
   cli_set = params.get("input_file"), params.get("url"), params.get("sync")
   if not any(cli_set):
     main_tui()
@@ -206,27 +208,34 @@ def main_cli(**kwargs) -> None:
 def save_multiples_url(input_file: str, params: dict) -> None:
 
   # --- Load urls from file ---
-  with open(input_file, "r", encoding="utf-8") as f:
-    content = f.readlines()
-    valid_urls = [url.strip() for url in content if validators.url(url.strip())]
-
+  try:
+    with open(input_file, "r", encoding="utf-8") as f:
+      content = f.readlines()
+      valid_urls = [url.strip() for url in content if validators.url(url.strip())]
+  except Exception:
+    console.print("[bold red] Invalid File [/bold red]")
+    return
+  
   # --- Save each url ---
+  if not valid_urls:
+    console.print("[bold red] No URL found to save [/bold red]")
+    return 
+  
   for url in valid_urls:
     unique_params = params.copy()
     creation_date = {"creation_date": dt.now().strftime("%Y-%m-%d %H:%M")}
     unique_params.update(creation_date)
     unique_params["url"] = url
-    # del unique_params["input_file"]
     save_json_data(unique_params)
   
-  show_message(f"{len(valid_urls)} urls saved!")
+  console.print(f"[bold green] {len(valid_urls)} urls saved! [/bold green]")
 # ====================================
 
 
 # :::::::::: SAVE ONE URL ::::::::::
 def save_single_url(url: str, params: dict) -> None:
   if not validators.url(url):
-    show_message("Invalid url")
+    console.print("[bold red] Invalid url [/bold red]")
     return
  
   creation_date = {"creation_date": dt.now().strftime("%Y-%m-%d %H:%M")}
@@ -235,7 +244,7 @@ def save_single_url(url: str, params: dict) -> None:
   params["url"] = url
   save_json_data(params)
   
-  show_message("Url saved!")
+  console.print("[bold green] Url saved! [/bold green]")
 # ====================================
 
 
@@ -271,13 +280,13 @@ def get_checksum(text: bytes) -> str:
 
 
 # :::::::::: DOWNLOAD AND SAVE IMAGE ::::::::::
-async def download_files(url: str, httpx_c: httpx.Client) -> str:
+async def download_files(url: str, httpx_c: httpx.Client, ext_needed: str | None =None) -> str:
   try:
     response = await httpx_c.get(url, follow_redirects=True)
     content_type = response.headers.get('Content-Type', '')
 
-    if response.status_code != 200:
-      return f"![error downloading]({url})" # for avoid local images emptys
+    if response.status_code != 200 or (ext_needed and ext_needed not in content_type):
+      return None
       
     file_obj =  response.content
 
@@ -293,12 +302,12 @@ async def download_files(url: str, httpx_c: httpx.Client) -> str:
     return md5_filename
 
   except Exception:  
-    logger.exception("Error downloading images")
+    console.print("[bold red] Error download images [/bold red]")
 # ====================================
 
 
 # :::::::::: CONTENT TYPE ::::::::::
-async def check_content_type(url: str, httpx_c: httpx.Client, extension="text") -> str | None:
+async def check_content_type(url: str, httpx_c: httpx.Client) -> str | None:
   response = await httpx_c.head(url, follow_redirects=True)
   
   if response.status_code != 200: 
@@ -306,26 +315,27 @@ async def check_content_type(url: str, httpx_c: httpx.Client, extension="text") 
   
   content_type = response.headers.get("content-type")
 
-  return url if content_type and extension in content_type else None
+  return url if content_type and "text" in content_type else None
 # ====================================
 
 
 # :::::::::: CATCH BRACKETS ::::::::::
-def catch_brackets(md_article: str) -> list:
-  regex_brackets = r"^[!\\[].*\)$"
-  return brackets if (brackets := re.findall(regex_brackets, md_article, re.MULTILINE)) else []
+def catch_brackets(md_article: str) -> list | None:
+  return brackets if (brackets := re.findall(BRACKETS_REGEX, md_article, re.MULTILINE)) else []
 # ====================================
 
 
 # :::::::::: CATCH IMG URLS ::::::::::
 def catch_img_urls(brackets: list) -> list | None:
-  urls_regex = r"http[^)]*(?=\))"
-  return urls if (urls := [m.group(0) for url in brackets if (m := re.search(urls_regex, url))]) else []
+  return urls if (urls := [m.group(0) for url in brackets if (m := re.search(BRACKET_IMG_REGEX, url))]) else []
 # ====================================
 
 
 # :::::::::: SANITIZE FILENAME ::::::::::
 def sanitize_text(text: str) -> str:
+  if not text:
+    return text
+
   forbidden_chars = r"[\[\]#^\\|*'\"/:?¿¡<>]"
   cleaned_text = re.sub(forbidden_chars, "", text)
   return cleaned_text[:200]
@@ -401,13 +411,12 @@ def format_tags(tags: str) -> str | None:
   if not tags:
     return None
   
-  split_tags = tags.split(",")
-  valid_tags = [tag.strip() for tag in split_tags if tag.strip()]
+  valid_tags = [tag.strip() for tag in tags.split(",") if tag.strip()]
 
   if not valid_tags:
     return None
   
-  formatted_tags = "\n" + "".join(f" - {tag}\n" for tag in valid_tags)
+  formatted_tags = "\n" + "\n".join(f"  - {tag}" for tag in valid_tags)
   return formatted_tags
 # ====================================
 
@@ -431,26 +440,27 @@ def build_template(**kwargs) -> str:
     "%PUBLISHED"
   ]
   
-  missing_values = [key for key in required_fields if kwargs.get(key) is None or kwargs.get(key) == ""]
+  invalid_fields = [key for key in required_fields if kwargs.get(key) is None or kwargs.get(key) == ""]
   
   with open(TEMPLATE, "r", encoding="utf-8") as f:
     template = f.read()
   
   # --- Declutter Template ---
-  if missing_values:
-    for key in missing_values:
+  if invalid_fields:
+    for key in invalid_fields:
       kwargs.pop(key, None)
 
-    yaml_to_del = "|".join(missing_values)
-    valid_lines = [line for line in template.split("\n") if not re.search(yaml_to_del, line)]
-    template = '\n'.join(valid_lines)
+    fields_to_del = "|".join(invalid_fields)
+    valid_template = [line for line in template.split("\n") if not re.search(fields_to_del, line)]
+    template = '\n'.join(valid_template)
 
-  # --- Build Template ---
+  # --- Build special field ---
   if kwargs.get("%RESOURCES") and kwargs.get("%TITLE"):
     resources = kwargs.get("%RESOURCES")
     title = sanitize_text(kwargs.get("%TITLE"))
     kwargs["%RESOURCES"] = f"'[[{resources} | {title}]]'"
-    
+  
+  # --- Build Template ---  
   for variable, value in kwargs.items():
     if variable in template:
       template = template.replace(str(variable), str(value))
@@ -466,46 +476,11 @@ def del_synced_file(json_path: Path) -> None:
 # ====================================
 
 
-# :::::::::: SHOW MESSAGES ::::::::::
-def show_message(msg: str, custom_style="Bold") -> None:
-  console.print(f"{msg}", style=custom_style)
-# ====================================
-
-
 # :::::::::: MICROSOFT EDGE TTS ::::::::::
 def text_to_voice(text: str, name_file: str) -> None:
   output_audio_file = ATTACHMENTS_DIR.joinpath(f"{name_file}.mp3")
   communicate = edge_tts.Communicate(text, TTS_VOICE)
   communicate.save_sync(output_audio_file)
-# ====================================
-
-
-# :::::::::: GET PDFS ::::::::::
-async def get_pdfs(md_article: str, httpx_c: httpx.Client) -> str | None:
-  # --- Find all urls ---
-  all_urls = re.findall(URL_REGEX, md_article, re.MULTILINE)
-
-  filetype_results = await asyncio.gather(*[get_file_bytes(url, httpx_c) for url in all_urls], return_exceptions=True)
-
-  valid_pdf_urls = [url for result in filetype_results if result and not isinstance(result, Exception) for data, url in [result] if data and data.startswith(b"%PDF")]
-
-  if not valid_pdf_urls:
-    return None
-
-  download_tasks = [download_files(url, httpx_c) for url in valid_pdf_urls]
-  pdfs_md5_names = await asyncio.gather(*download_tasks, return_exceptions=True)
-
-  pdf_sublist = []
-        
-  for ext_pdf, local_pdf in zip(valid_pdf_urls, pdfs_md5_names):
-    pdf_filename = ext_pdf.split("/")[-1]
-    pdf_name_formated = re.sub(r"-|_|%\d{2}|(?<=\.pdf).+$", " ", pdf_filename).capitalize()
-    pdf_sublist.append(f"\t - [{pdf_name_formated}]({local_pdf})\n")
-          
-  header = "- Papers cited in this article:" + "\n"
-  stylized_sublist = header + "".join(pdf_sublist)
-              
-  return stylized_sublist
 # ====================================
 
 
@@ -618,24 +593,23 @@ def catch_paragraphs(nodes, excluded=False):
 # ====================================
 
 # ::::::::::SAVE RESOURCES ::::::::::
-async def save_sources(md_article: str, httpx_c) -> list | str:
+async def save_resources(md_article: str, httpx_c) -> list | str:
   regex_brackets = r"[!\\[].*\)"
   brackets = re.findall(regex_brackets, md_article, re.MULTILINE)
-  website_urls = []
+  resource_urls = []
   
   if brackets:
-    urls_regex = r"http[^)]*(?=\))"
-    website_urls = [remove_tracking(url_match.group(0)) for url in brackets if (url_match := re.search(urls_regex, url))]
+    resource_urls = [remove_tracking(url_match.group(0)) for url in brackets if (url_match := re.search(BRACKET_IMG_REGEX, url))]
 
   # --- get type ---
-  if not website_urls:
+  if not resource_urls:
     return None
 
-  type_tasks = [check_content_type(url, httpx_c) for url in website_urls]
+  type_tasks = [check_content_type(url, httpx_c) for url in resource_urls]
   content_type = await asyncio.gather(*type_tasks, return_exceptions=True)
 
   # --- filter valid custom content ---
-  valid_content = list(filter(None, content_type))
+  valid_content = [c for c in content_type if c is not None and not isinstance(c, Exception)]
   
   if not valid_content:
     return None
@@ -660,10 +634,9 @@ def substack_fix(url: str) -> str:
   if not re.match(r"https\:\/+open", url):
     return url
   
-  username_regex = r"(?<=pub\/).+(?=\/p)"
-  user_match = re.search(username_regex, url)
+  username_match = re.search(r"(?<=pub\/).+(?=\/p)", url)
   cleaned_url = re.sub(r"\/pub\/.+(?=\/p)", "", url)
-  replaced_username = re.sub(r"open", user_match.group(0), cleaned_url)
+  replaced_username = re.sub(r"open", username_match.group(0), cleaned_url)
   
   return replaced_username
 # ====================================
@@ -775,7 +748,7 @@ class ArticleBuilder:
     self.md_article = await self.handle_images(brackets, urls)
     
     # --- RESOURCES ---
-    self.resources = await save_sources(self.md_article, self.httpx_c)
+    self.resources = await save_resources(self.md_article, self.httpx_c)
     self.md_article = remove_md_links(self.md_article)
     
     # --- PDFS ---
@@ -818,7 +791,6 @@ class ArticleBuilder:
 
 
   # :::::::::: CLASS - LOAD WEB PAGE ::::::::::
-  @logger.catch
   async def load_web_site(self) -> str | None:
     defuddle_url = re.sub(r"^https:\/\/", "https://defuddle.md/", self.url) or self.url
     response = await self.httpx_c.get(defuddle_url, follow_redirects=True)
@@ -858,47 +830,29 @@ class ArticleBuilder:
 
 
   # :::::::::: CLASS - HANDLE IMAGES ::::::::::
-  @logger.catch
   async def handle_images(self, brackets: list, urls: list) -> str:
-    # --- get type ---
-    type_tasks = [check_content_type(url, self.httpx_c, extension="image") for url in urls]
-    urls_ext = await asyncio.gather(*type_tasks, return_exceptions=True)
-
-    # --- filter valid images ---
-    grouped = list(zip(brackets, urls, urls_ext))
-    grouped = list(zip(brackets, urls_ext))
-    valid_imgs = [(bracket, url) for bracket, url in grouped if url]
-
-    if not valid_imgs:
-      return self.md_article
-
-    # --- download images ---
-    down_tasks = [download_files(url, self.httpx_c) for bracket, url in valid_imgs]
-    md5_imgs = await asyncio.gather(*down_tasks, return_exceptions=True)
-
-    mapping = [valid_imgs[i] + (md5_imgs[i],) for i in range(len(md5_imgs))]
-
-    # ---- remove duplicates ---
+    download_task = [download_files(url, self.httpx_c, ext_needed="image") for url in urls]
+    md5_imgs = await asyncio.gather(*download_task, return_exceptions=True)
+  
+    mapping = list(zip(urls, md5_imgs))
     done = set()
-    for ext_img, _, local_img in mapping:
-      if ext_img in done or local_img is None:
+  
+    for ext_img, local_img in mapping:
+      if ext_img in done or not local_img or isinstance(local_img, Exception):
         continue
-      
+  
       done.add(ext_img)
       count = self.md_article.count(ext_img)
-      
       if count > 1:
-          self.md_article = self.md_article.replace(ext_img, "", count - 1)
-      
-      md5_local = f"![[{local_img}]]"
-      self.md_article = self.md_article.replace(ext_img, md5_local, 1)
-
+        self.md_article = self.md_article.replace(ext_img, "", count - 1)
+  
+      self.md_article = self.md_article.replace(ext_img, local_img, 1)
+  
     return self.md_article
   # ====================================
 
 
   # :::::::::: CLASS - GET PDFS ::::::::::
-  @logger.catch
   async def get_pdfs(self) -> str | None:
     
     # --- Find all urls ---
@@ -952,7 +906,7 @@ async def handle_sync() -> None:
   articles_json = [(json.loads(f.read_text()), f) for f in list(OFFLINE_DIR.glob("*.json"))]
   
   if not articles_json:
-    show_message("Nothing to sync")
+    console.print("[bold green] Nothing to sync [/bold green]")
     return
   
   semaphore = asyncio.Semaphore(2)
