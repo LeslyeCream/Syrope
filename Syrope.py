@@ -643,13 +643,10 @@ def substack_fix(url: str) -> str:
 
 
 # ::::: FORMAT DATE :::::
-def format_published_date(input_date):
-  in_date = str(input_date)
-  if not in_date:
+def format_published_date(input_date: datetime | str | None) -> str | None:
+  if not isinstance(input_date, datetime):
     return None
-  
-  match_date = re.sub(r"^(\d+-\d+-\d+)(T|\s+)(\d+:\d+).*", r"\1 \3", in_date).strip() 
-  return match_date if match_date else None
+  return input_date.strftime(DATETIME_FORMAT)
 # ====================================
 
 
