@@ -26,6 +26,8 @@ from rich.traceback import install
 from datetime import datetime, timezone
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from markdown_plain_text.extention import convert_to_plain_text
+from montydb import set_storage, MontyClient
+from functools import lru_cache
 
 
 # :::::::::: TO-DO ::::::::::
@@ -51,11 +53,10 @@ with open(settings_file, "r", encoding="utf-8") as file:
   settings = yaml.safe_load(file)
 
 # --- Paths ----
-OFFLINE_DIR = Path(__file__).parent.joinpath("Offline")
 ARTICLES_DIR = Path(settings["PATHS"]["ARTICLES_DIR"])
 ATTACHMENTS_DIR = Path(settings["PATHS"]["ATTACHMENTS_DIR"])
-ARTICLES_SYNCED_DIR = Path(__file__).parent.joinpath("Done")
 TEMPLATE = Path(__file__).parent.joinpath("Template")
+DATABASE_PATH = str(Path(__file__).parent.joinpath("Database"))
 
 # --- Settings ---
 TRANSLATE_LANGUAGES = settings["OTHERS"]["TRANSLATE_LANGUAGES"]
@@ -88,7 +89,7 @@ LOG_FILE = Path(__file__).parent /  "logs.log"
 logger.add(LOG_FILE, format="\n" + "="*50 + "\n{time: HH:mm:ss} | {level} | LINE: {line} \n" + "="*50 + "\n")
 
 # --- CHECK FOLDERS ---
-for folder_path in [OFFLINE_DIR, ARTICLES_DIR, ATTACHMENTS_DIR, ARTICLES_SYNCED_DIR]:
+for folder_path in [ARTICLES_DIR, ATTACHMENTS_DIR]:
   folder_path.mkdir(parents=True, exist_ok=True)
 # ====================================
 
@@ -121,36 +122,27 @@ def main_tui() -> None:
 
 # :::::::::: TUI - ADD URL ::::::::::
 def menu_add_url() -> None:
-  option = questionary.select("How do you want to add it?", choices=["1. Single URL", "2. From file", "3. Back"],).ask()
+  option: str = questionary.select("How do you want to add it?", choices=["1. Single URL", "2. From file", "3. Back"],).ask()
 
   match option:
     case "1. Single URL":
-      save_single_url(input("Entered the url: "), PARAM_DEFAULTS)
+      save_urls(input("Entered the url: "), PARAM_DEFAULTS)
     case "2. From file":
-      save_multiples_url(input("Entered the file path: "), PARAM_DEFAULTS)
+      user_file: str = Path(input("Entered the file path: ")) 
+      save_urls(user_file, PARAM_DEFAULTS)
     case "3. Back":
       main_tui()
 # ====================================
 
 
-# :::::::::: JSON DATA ::::::::::
-def get_json_data(json_path: Path) -> str:
-  with open(json_path, "r", encoding="utf-8") as f:
-    return json.load(f)
-# ====================================
-
-
 # :::::::::: TUI - VIEW SAVED LINKS ::::::::::
 def view_saved_articles() -> None:
-
-  # --- Get article list ---
-  json_files = list(OFFLINE_DIR.glob("*.json"))
-
-  if not len(json_files):
+  all_articles = list(QUEUE_DB.find({}))
+  
+  if not all_articles:
     console.print("[bold red] No items saved [/ bold red]")
-
-  json_data = [data for json_f in json_files if (data := get_json_data(json_f))]
-
+    return
+    
   # --- Build Table ---
   table = Table(title="Links saved", show_lines=True)
   table.add_column("Url", style="cyan")
@@ -158,11 +150,10 @@ def view_saved_articles() -> None:
   table.add_column("Attributes", style="green", justify="center")
 
   # --- Get Attributes ---
-  for data in json_data:
-    valid_attr = [k for k, v in data.items() if v and k not in ["url", "sync", "creation_date", "input_file"]]
+  for art_data in all_articles:
+    valid_attr = [attr for attr, value in art_data.items() if value and attr not in ["_id", "url", "sync", "creation_date", "input_file"]]
     attributes = " - ".join(valid_attr)
-
-    table.add_row(data["url"], str(data["creation_date"]), attributes)
+    table.add_row(art_data["url"], str(art_data["creation_date"]), attributes)
 
   console.print(table)
 # ====================================
@@ -176,100 +167,101 @@ def view_saved_articles() -> None:
 @click.option("-v", "--voice", is_flag=True, help="Create an audio version of the article")
 @click.option("-r", "--regex", is_flag=True, help="Apply custom regex")
 @click.option("-i", "--input-file", type=str, help="Save urls from an external file")
-@click.option("-p", "--pdfs", type=str, help="Download external pdfs")
+@click.option("-p", "--pdfs", is_flag=True, help="Download external pdfs")
 @click.option("-s", "--sync", is_flag=True, help="Start sync")
-def main_cli(**kwargs) -> None:
-  params = kwargs
+def main_cli(**params) -> None:
   
   # --- Save urls from file ---
   input_file = params.get("input_file")
+  url = params.get("url")
   
   # --- CLI ---
-  cli_set = params.get("input_file"), params.get("url"), params.get("sync")
-  if not any(cli_set):
+  if not any(params.values()):
     main_tui()
+    return
    
    # --- Multiples urls ---
-  elif input_file:
-    save_multiples_url(input_file, params)
+  if input_file:
+    save_urls(Path(input_file), params)
 
   # --- Save single url ---
-  elif params.get("url"):
-    url = params.get("url")
-    save_single_url(url, params)
+  if url:
+    save_urls(url, params)
 
   # --- Start sync ---
-  elif params.get("sync"):
+  if params.get("sync"):
     asyncio.run(handle_sync())
+     
+  if not (input_file or url or params.get("sync")):
+    click.echo("Missing required data")
 # ====================================
 
 
-# :::::::::: SAVE MULTIPLE URLS FROM CLI ::::::::::
-def save_multiples_url(input_file: str, params: dict) -> None:
+# :::::::::: SAVE URL(S) FROM CLI ::::::::::
+def save_urls(urls: str|Path, params: dict) -> None:
+  now = dt.now().strftime("%Y-%m-%d %H:%M")
+  
+  if isinstance(urls, Path):
+    
+    # --- Load urls from file ---
+    try:
+      with open(urls, "r", encoding="utf-8") as f:
+        content = f.readlines()
+    except Exception:
+      console.print("[bold red] Invalid File [/bold red]")
+      return
+    
+    valid_urls = [url.strip() for url in content if validators.url(url.strip())]
+    if not valid_urls:
+      console.print("[bold red] No URL found to save [/bold red]")
+      return 
+    
+    # --- Save each url ---
 
-  # --- Load urls from file ---
-  try:
-    with open(input_file, "r", encoding="utf-8") as f:
-      content = f.readlines()
-      valid_urls = [url.strip() for url in content if validators.url(url.strip())]
-  except Exception:
-    console.print("[bold red] Invalid File [/bold red]")
-    return
-  
-  # --- Save each url ---
-  if not valid_urls:
-    console.print("[bold red] No URL found to save [/bold red]")
-    return 
-  
-  for url in valid_urls:
-    unique_params = params.copy()
-    creation_date = {"creation_date": dt.now().strftime("%Y-%m-%d %H:%M")}
-    unique_params.update(creation_date)
-    unique_params["url"] = url
-    save_json_data(unique_params)
-  
-  console.print(f"[bold green] {len(valid_urls)} urls saved! [/bold green]")
-# ====================================
+    saved = []
+    for url in valid_urls:
+      
+      if url not in saved:
+        artt_params = params.copy()
+        artt_params.update({"creation_date": now})
+        artt_params["url"] = url
+        
+        QUEUE_DB.insert_one(artt_params)
+        saved.append(url)
 
-
-# :::::::::: SAVE ONE URL ::::::::::
-def save_single_url(url: str, params: dict) -> None:
-  if not validators.url(url):
-    console.print("[bold red] Invalid url [/bold red]")
-    return
- 
-  creation_date = {"creation_date": dt.now().strftime("%Y-%m-%d %H:%M")}
-  params = params.copy()
-  params.update(creation_date)
-  params["url"] = url
-  save_json_data(params)
+    console.print(f"[bold green] {len(valid_urls)} urls saved! [/bold green]")
   
-  console.print("[bold green] Url saved! [/bold green]")
+  # --- Single url --- 
+  else:
+    if not validators.url(urls):
+      return console.print("[bold red] Invalid url [/bold red]")
+
+    params = params.copy()
+    params.update({"creation_date": now})
+    params["url"] = urls
+    
+    QUEUE_DB.insert_one(params)
+    
+    console.print("[bold green] Url saved! [/bold green]")
 # ====================================
 
 
 # ::::::::::REMOVE TRACKING PARAMETERS ::::::::::
 def remove_tracking(url: str) -> str:
   try:
-    cleaned_url = re.sub(r"\?.*", "", url)
+    cleaned_url: str = re.sub(r"\?.*", "", url)
     return cleaned_url
   except Exception:
     return url
 # ====================================
 
 
-# :::::::::: SAVE PARAMETERS IN JSON ::::::::::
-def save_json_data(params: dict) -> None:
-  url = params.get("url")
-  
-  if url is None or not validators.url(url):
-    return None
-  
-  json_name = get_checksum(url.encode("utf-8"))
-  full_path = OFFLINE_DIR.joinpath(f"{json_name}.json")
-  
-  with open(full_path, "w", encoding="utf-8") as f:
-    json.dump(params, f, ensure_ascii=False, indent=4)
+# ::::: ADD TO DATABASE :::::
+@lru_cache(maxsize=1)
+def load_database() -> MontyClient:
+  set_storage(repository=DATABASE_PATH, storage="flatfile")
+  main = MontyClient(DATABASE_PATH)["Articles"]
+  return main["Queue"], main["Synced"]
 # ====================================
 
 
@@ -469,13 +461,6 @@ def build_template(**kwargs) -> str:
 # ====================================
 
 
-# :::::::::: DELETE / MOVE JSON FINISHED ::::::::::
-def del_synced_file(json_path: Path) -> None:
-  done_path = ARTICLES_SYNCED_DIR.joinpath(json_path.name)
-  json_path.unlink(missing_ok=True) if DEL_SYNCED_ARTICLES else json_path.rename(done_path)
-# ====================================
-
-
 # :::::::::: MICROSOFT EDGE TTS ::::::::::
 def text_to_voice(text: str, name_file: str) -> None:
   output_audio_file = ATTACHMENTS_DIR.joinpath(f"{name_file}.mp3")
@@ -485,7 +470,6 @@ def text_to_voice(text: str, name_file: str) -> None:
 
 
 # :::::::::: GET FILE TYPE ::::::::::
-
 async def get_file_bytes(url: str, httpx_c: httpx.Client) -> tuple | None:
   response = await httpx_c.get(url, headers={"Range": "bytes=0-32"}, follow_redirects=True)
   type_file = response.content
@@ -624,7 +608,7 @@ async def save_resources(md_article: str, httpx_c) -> list | str:
 
 
 # :::::::::: REMOVE MARKDOWN LINKS ::::::::::
-def remove_md_links(md_article):
+def remove_md_links(md_article) -> None:
   return re.sub(r'(?<!\!)\[(?!!)([^\]]+)\]\([^)]+\)', r'\1', md_article)
 # ====================================
 
@@ -643,7 +627,7 @@ def substack_fix(url: str) -> str:
 
 
 # ::::: FORMAT DATE :::::
-def format_published_date(input_date: datetime | str | None) -> str | None:
+def format_published_date(input_date):
   if not isinstance(input_date, datetime):
     return None
   return input_date.strftime(DATETIME_FORMAT)
@@ -652,19 +636,19 @@ def format_published_date(input_date: datetime | str | None) -> str | None:
 
 # :::::::::: MAIN CLASS ::::::::::
 class ArticleBuilder:
-  def __init__(self, json_data: dict, json_file: Path, httpx_c: httpx.Client, progress_bar, task_id):
+  def __init__(self, article_db: dict, httpx_c: httpx.Client, progress_bar, task_id):
     
     # --- File Config ---
-    self.creation_date = json_data["creation_date"]
-    self.url = json_data["url"]
-    self.voice = json_data["voice"]
-    self.tags = json_data["labels"]
-    self.custom_regex = json_data["regex"]
-    self.translation = json_data["translate"]
-    self.pdfs = json_data["pdfs"]
+    self.creation_date = article_db["creation_date"]
+    self.url = article_db["url"]
+    self.voice = article_db["voice"]
+    self.tags = article_db["labels"]
+    self.custom_regex = article_db["regex"]
+    self.translation = article_db["translate"]
+    self.pdfs = article_db["pdfs"]
     
     # --- Attributes ---
-    self.json_file = json_file
+    #self.json_file = json_file
     self.httpx_c = httpx_c
     self.progress_bar = progress_bar
     self.task_id = task_id
@@ -782,8 +766,9 @@ class ArticleBuilder:
     self._progress("Saving file...")
     save_to_file(self.title, note_templated)
     
-    # --- DELETE SYNCED FILE ---
-    del_synced_file(self.json_file)
+    # --- DELETE SYNCED ARTICLE ---
+    SYNCED_DB.insert_one({"url": self.url})
+    QUEUE_DB.delete_one({"url": self.url})
     self.progress_bar.update(self.task_id, completed=100)
 
 
@@ -883,12 +868,12 @@ class ArticleBuilder:
 
 
 # :::::::::: RUN SYNC ::::::::::
-async def run_sync(json_data: dict, json_file: str, semaphore, progress_bar, httpx_c: httpx.Client) -> None:
+async def run_sync(article_db: dict, semaphore, progress_bar, httpx_c: httpx.Client) -> None:
   async with semaphore:
     try:
       
-      task_id = progress_bar.add_task("Starting...", total=100, filename=json_data["url"])
-      processor = ArticleBuilder(json_data, json_file, httpx_c, progress_bar, task_id)
+      task_id = progress_bar.add_task("Starting...", total=100, filename=article_db.get("url"))
+      processor = ArticleBuilder(article_db, httpx_c, progress_bar, task_id)
       await processor.main()
       progress_bar.update(task_id, completed=100, description="[green]✓ Done[/green]")
     
@@ -900,21 +885,21 @@ async def run_sync(json_data: dict, json_file: str, semaphore, progress_bar, htt
 
 # ::::::::::QUEUE ARTICLES ::::::::::
 async def handle_sync() -> None:
-  articles_json = [(json.loads(f.read_text()), f) for f in list(OFFLINE_DIR.glob("*.json"))]
-  
-  if not articles_json:
+  valid_articles = [(article_obj, article_obj.get("url")) for article_obj in QUEUE_DB.find({})]
+
+  if not valid_articles:
     console.print("[bold green] Nothing to sync [/bold green]")
     return
   
-  semaphore = asyncio.Semaphore(2)
+  semaphore = asyncio.Semaphore(4)
   
   custom_bar = r"{task.percentage}% - {task.description} ([yellow]{task.fields[filename]}[/yellow])"
   
   try:
-    
     with Progress(SpinnerColumn(), TextColumn(custom_bar), refresh_per_second=30) as progress_bar:
+      
       async with httpx.AsyncClient(headers={"User-Agent":USER_AGENT}) as httpx_c:
-        await asyncio.gather(*(run_sync(json_data[0], json_data[1], semaphore, progress_bar, httpx_c) for json_data in articles_json), return_exceptions=True)
+        await asyncio.gather(*(run_sync(article_db[0], semaphore, progress_bar, httpx_c) for article_db in valid_articles), return_exceptions=True)
         console.print("[bold green]✓ Sync Finished[/bold green]")
   
   except Exception:
@@ -923,5 +908,5 @@ async def handle_sync() -> None:
 
 
 if __name__ == "__main__":
+  QUEUE_DB, SYNCED_DB = load_database()
   main_cli()
-  
