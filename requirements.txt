@@ -12,3 +12,4 @@ rich==15.0.0
 validators==0.35.0
 markdown>=3.3.3
 -e git+https://github.com/kostyachum/python-markdown-plain-text.git#egg=plain-text-markdown-extention
+montydb==2.5.6
